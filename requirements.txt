@@ -1,0 +1,4 @@
+# Mirrors pyproject.toml [project.dependencies]
+numpy>=1.24
+opencv-python>=4.8
+scipy>=1.11
