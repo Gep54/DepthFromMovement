@@ -1,4 +1,5 @@
 from viz.recorder import PipelineRecorder, STEP_ORDER
+from pipeline.features import FrameFeatures, compute_frame_features_cache
 from viz.step_runner import (
     ensure_all_step_pngs_exist,
     ensure_sequence_outputs_exist,
@@ -29,6 +30,8 @@ from viz.overlays import (
 )
 
 __all__ = [
+    "FrameFeatures",
+    "compute_frame_features_cache",
     "PipelineRecorder",
     "STEP_ORDER",
     "blend_photo_depth_colormap",

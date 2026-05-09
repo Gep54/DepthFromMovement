@@ -16,7 +16,7 @@ from pipeline.geometry import (
 )
 from pipeline.matching import match_pair_points
 from pipeline.triangulation import triangulate_world_points, triangulate_cam1_frame, cam1_to_world_points
-from pipeline.features import detect_and_compute
+from pipeline.features import FrameFeatures, detect_and_compute
 from pipeline.metrics import reprojection_errors, summarize_reprojection
 
 
@@ -71,9 +71,18 @@ class IncrementalMap:
         j: int,
         gray_i: np.ndarray,
         gray_j: np.ndarray,
+        *,
+        features_i: FrameFeatures | None = None,
+        features_j: FrameFeatures | None = None,
     ) -> TwoViewResult:
-        kpi, di = detect_and_compute(gray_i, self.feat_cfg)
-        kpj, dj = detect_and_compute(gray_j, self.feat_cfg)
+        if features_i is not None:
+            kpi, di = features_i.keypoints, features_i.descriptors
+        else:
+            kpi, di = detect_and_compute(gray_i, self.feat_cfg)
+        if features_j is not None:
+            kpj, dj = features_j.keypoints, features_j.descriptors
+        else:
+            kpj, dj = detect_and_compute(gray_j, self.feat_cfg)
         pts1, pts2, _ = match_pair_points(kpi, kpj, di, dj, self.feat_cfg)
         if len(pts1) < 8:
             empty = np.zeros((4, 0), np.float64)

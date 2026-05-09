@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import cv2
 import numpy as np
 
 from pipeline.config import FeatureConfig
+
+
+@dataclass
+class FrameFeatures:
+    """ORB/SIFT keypoints and descriptors for one grayscale frame (shared across pairs)."""
+
+    keypoints: list[Any]
+    descriptors: np.ndarray | None
+
+
+def compute_frame_features_cache(images_gray: Sequence[np.ndarray], cfg: FeatureConfig) -> list[FrameFeatures]:
+    """Run ``detect_and_compute`` once per frame; reuse entries when matching multiple pairs."""
+    return [FrameFeatures(*detect_and_compute(g, cfg)) for g in images_gray]
 
 
 def _make_detector(cfg: FeatureConfig) -> tuple[Any, Any]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import cv2
@@ -7,7 +8,7 @@ import numpy as np
 
 from data.dataset import Dataset, load_gt_depth_for_frame, read_image_bgr
 from pipeline.config import FeatureConfig, clamp_motion_confidence
-from pipeline.features import detect_and_compute
+from pipeline.features import FrameFeatures, compute_frame_features_cache, detect_and_compute
 from pipeline.geometry import essential_from_world_poses, invert_se3
 from pipeline.map import IncrementalMap, MapConfig, TwoViewResult
 from pipeline.fusion import FusedLandmarkMap, fused_world_points_homogeneous
@@ -65,6 +66,7 @@ def export_single_pair_stages(
     motion_confidence: float = 1.0,
     feat_cfg: FeatureConfig | None = None,
     reuse_two_view: TwoViewResult | None = None,
+    frame_features_cache: Sequence[FrameFeatures] | None = None,
 ) -> None:
     """
     Run the two-view pipeline for frames ``(i, j)`` and write every ``STEP_ORDER`` PNG under
@@ -72,6 +74,10 @@ def export_single_pair_stages(
 
     If ``reuse_two_view`` is provided (must match ``(i, j)``), geometry from that result is
     reused so sequence export can fuse landmarks without duplicate solving.
+
+    If ``frame_features_cache`` is set (length at least ``max(i, j) + 1``), keypoints for ``02_keypoints``
+    and matching inside ``add_frame_pair`` reuse precomputed descriptors instead of running
+    detection again per pair.
     """
     feat_cfg = feat_cfg if feat_cfg is not None else ds.feature_config
     motion_confidence = clamp_motion_confidence(motion_confidence)
@@ -88,16 +94,22 @@ def export_single_pair_stages(
     Wi = ds.world_T_camera[i]
     Wj = ds.world_T_camera[j]
 
+    fi = frame_features_cache[i] if frame_features_cache is not None else None
+    fj = frame_features_cache[j] if frame_features_cache is not None else None
+
     if reuse_two_view is not None:
         assert reuse_two_view.frame_i == i and reuse_two_view.frame_j == j
         tw = reuse_two_view
     else:
         map_cfg = MapConfig(motion_confidence=motion_confidence)
         m = IncrementalMap(cfg=map_cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
-        tw = m.add_frame_pair(i, j, g_i, g_j)
+        tw = m.add_frame_pair(i, j, g_i, g_j, features_i=fi, features_j=fj)
     pts1, pts2 = tw.pts1, tw.pts2
 
-    kpi, _ = detect_and_compute(g_i, feat_cfg)
+    if fi is not None:
+        kpi = fi.keypoints
+    else:
+        kpi, _ = detect_and_compute(g_i, feat_cfg)
     kp_img = draw_keypoints(und_i, np.float32([kp.pt for kp in kpi]))
     rec.write("keypoints", kp_img)
     rec.write("matches", draw_matches(und_i, und_j, pts1, pts2))
@@ -174,6 +186,7 @@ def export_all_stages(
     j: int = 1,
     motion_confidence: float = 1.0,
     feat_cfg: FeatureConfig | None = None,
+    frame_features_cache: Sequence[FrameFeatures] | None = None,
 ) -> None:
     """Single pair ``(i, j)`` into flat ``run_dir/steps/``."""
     export_single_pair_stages(
@@ -183,6 +196,7 @@ def export_all_stages(
         j=j,
         motion_confidence=motion_confidence,
         feat_cfg=feat_cfg,
+        frame_features_cache=frame_features_cache,
     )
 
 
@@ -232,6 +246,8 @@ def export_sequence_consecutive_pairs(
         _, g = _undistort_if_needed(bgr, ds)
         grays.append(g)
 
+    frame_cache = compute_frame_features_cache(grays, fc)
+
     map_cfg = MapConfig(motion_confidence=mc)
     inc = IncrementalMap(
         cfg=map_cfg,
@@ -244,7 +260,14 @@ def export_sequence_consecutive_pairs(
 
     pairs = iter_sequence_pairs(n, wl)
     for i, j in pairs:
-        tw = inc.add_frame_pair(i, j, grays[i], grays[j])
+        tw = inc.add_frame_pair(
+            i,
+            j,
+            grays[i],
+            grays[j],
+            features_i=frame_cache[i],
+            features_j=frame_cache[j],
+        )
         fused.integrate_two_view_result(tw)
         pair_dir = pairs_root / f"{i:03d}_{j:03d}"
         export_single_pair_stages(
@@ -255,6 +278,7 @@ def export_sequence_consecutive_pairs(
             motion_confidence=mc,
             feat_cfg=fc,
             reuse_two_view=tw,
+            frame_features_cache=frame_cache,
         )
 
     traj_full = render_trajectory_topdown(
