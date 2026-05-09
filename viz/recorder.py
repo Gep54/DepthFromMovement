@@ -6,19 +6,16 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
-"""Ordered slugs align with the thesis step table (raw → metrics)."""
+"""Ordered slugs align with exported pipeline visuals (raw → metrics)."""
 
 STEP_ORDER: tuple[str, ...] = (
     "raw_input",
-    "undistort",
     "keypoints",
     "matches",
     "epilines",
     "inlier_outlier",
     "triangulation",
     "estimated_depth",
-    "scale_depth",
-    "trajectory_topdown",
     "depth_error",
 )
 

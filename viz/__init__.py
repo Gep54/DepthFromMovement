@@ -1,10 +1,11 @@
 from viz.recorder import PipelineRecorder, STEP_ORDER
 from viz.step_runner import (
+    ensure_all_step_pngs_exist,
+    ensure_sequence_outputs_exist,
     export_all_stages,
     export_sequence_consecutive_pairs,
     export_single_pair_stages,
-    ensure_all_step_pngs_exist,
-    ensure_sequence_outputs_exist,
+    iter_sequence_pairs,
 )
 
 # Re-export fusion helpers used with sequence export
@@ -50,6 +51,7 @@ __all__ = [
     "export_single_pair_stages",
     "ensure_all_step_pngs_exist",
     "ensure_sequence_outputs_exist",
+    "iter_sequence_pairs",
     "FusedLandmarkMap",
     "FusedLandmark",
     "fused_world_points_homogeneous",

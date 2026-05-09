@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-MotionMode = Literal["known_pose", "estimate_essential"]
+
+def clamp_motion_confidence(value: float) -> float:
+    """Clamp user input to [0, 1]."""
+    return float(max(0.0, min(1.0, value)))
 
 
 @dataclass

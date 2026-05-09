@@ -1,7 +1,9 @@
-from pipeline.config import FeatureConfig, MotionMode
+from pipeline.config import FeatureConfig, clamp_motion_confidence
 from pipeline.features import detect_and_compute
 from pipeline.matching import match_pair_points
 from pipeline.geometry import (
+    blend_relative_pose,
+    essential_from_R_t,
     essential_from_world_poses,
     relative_motion_from_world_poses,
     estimate_essential_ransac,
@@ -15,7 +17,9 @@ from pipeline.metrics import reprojection_errors, summarize_reprojection
 
 __all__ = [
     "FeatureConfig",
-    "MotionMode",
+    "clamp_motion_confidence",
+    "blend_relative_pose",
+    "essential_from_R_t",
     "detect_and_compute",
     "match_pair_points",
     "essential_from_world_poses",

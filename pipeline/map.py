@@ -5,27 +5,31 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from pipeline.config import MotionMode
+from pipeline.config import FeatureConfig, clamp_motion_confidence
 from pipeline.geometry import (
     essential_from_world_poses,
-    estimate_essential_ransac,
+    blend_relative_pose,
+    essential_from_R_t,
     recover_pose_from_essential,
     relative_motion_from_world_poses,
-    scale_from_odometry,
     align_translation_direction,
 )
 from pipeline.matching import match_pair_points
 from pipeline.triangulation import triangulate_world_points, triangulate_cam1_frame, cam1_to_world_points
 from pipeline.features import detect_and_compute
-from pipeline.config import FeatureConfig
 from pipeline.metrics import reprojection_errors, summarize_reprojection
 
 
 @dataclass
 class MapConfig:
-    motion_mode: MotionMode = "known_pose"
+    """``motion_confidence`` in [0, 1]: 1 = odometry relative pose; 0 = vision-only relative pose."""
+
+    motion_confidence: float = 1.0
     ransac_epipolar_thresh: float = 1.0
     min_parallax_deg: float = 0.5
+
+    def __post_init__(self) -> None:
+        self.motion_confidence = clamp_motion_confidence(self.motion_confidence)
 
 
 @dataclass
@@ -94,43 +98,60 @@ class IncrementalMap:
         R_gt, t_gt = relative_motion_from_world_poses(Wi, Wj)
         scale = 1.0
         scale_ok = True
-        E = None
-        R_est = None
-        t_est = None
-        mask = np.ones((len(pts1), 1), np.uint8)
+        alpha = float(self.cfg.motion_confidence)
 
-        if self.cfg.motion_mode == "known_pose":
-            E = essential_from_world_poses(Wi, Wj, self.K)
-            _, mask = cv2.findEssentialMat(
-                pts1,
-                pts2,
-                self.K,
-                method=cv2.RANSAC,
-                prob=0.999,
-                threshold=self.cfg.ransac_epipolar_thresh,
-            )
-        else:
-            E, mask = estimate_essential_ransac(
-                pts1,
-                pts2,
-                self.K,
-                threshold=self.cfg.ransac_epipolar_thresh,
-            )
-            R_est, t_est, _ = recover_pose_from_essential(E, pts1, pts2, self.K, mask=mask)
-            t_est = align_translation_direction(t_est, t_gt)
-            scale, scale_ok = scale_from_odometry(t_est, t_gt)
+        E_fm, mask = cv2.findEssentialMat(
+            pts1,
+            pts2,
+            self.K,
+            method=cv2.RANSAC,
+            prob=0.999,
+            threshold=self.cfg.ransac_epipolar_thresh,
+        )
+        E: np.ndarray | None
+        R_est: np.ndarray | None
+        t_est: np.ndarray | None
 
         inlier = mask.ravel().astype(bool)
         pts1_i = pts1[inlier]
         pts2_i = pts2[inlier]
-        if self.cfg.motion_mode == "known_pose":
+
+        def _failure_result(E_store: np.ndarray | None) -> TwoViewResult:
+            empty_h = np.zeros((4, 0), np.float64)
+            return TwoViewResult(
+                frame_i=i,
+                frame_j=j,
+                pts1=pts1,
+                pts2=pts2,
+                inlier_mask=mask,
+                E=E_store,
+                R_est=None,
+                t_est=None,
+                scale=1.0,
+                scale_ok=False,
+                X_world_h=empty_h,
+                cheiral_mask=np.zeros((0,), bool),
+                reproj={},
+            )
+
+        if pts1_i.shape[0] == 0:
+            return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
+
+        if alpha >= 1.0:
+            E = essential_from_world_poses(Wi, Wj, self.K)
             X_h, cheiral = triangulate_world_points(pts1_i, pts2_i, Wi, Wj, self.K)
+            R_est, t_est = R_gt.copy(), t_gt.copy()
         else:
-            assert R_est is not None and t_est is not None
-            X_cam_h, cheiral = triangulate_cam1_frame(pts1_i, pts2_i, self.K, R_est, t_est)
-            if scale_ok:
-                X_cam_h = X_cam_h.copy()
-                X_cam_h[:3, :] *= scale
+            if pts1_i.shape[0] < 8:
+                return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
+            E_fm33 = np.asarray(E_fm, dtype=np.float64).reshape(3, 3)
+            R_vis, t_vis, _ = recover_pose_from_essential(E_fm33, pts1_i, pts2_i, self.K, mask=None)
+            if alpha > 0.0:
+                t_vis = align_translation_direction(t_vis, t_gt)
+            R_b, t_b = blend_relative_pose(R_vis, t_vis, R_gt, t_gt, alpha)
+            R_est, t_est = R_b, t_b
+            E = essential_from_R_t(R_b, t_b)
+            X_cam_h, cheiral = triangulate_cam1_frame(pts1_i, pts2_i, self.K, R_b, t_b)
             X_h = cam1_to_world_points(X_cam_h, Wi)
         X_h[:, ~cheiral] = np.nan
         err1 = reprojection_errors(X_h, pts1_i, self.K, Wi)

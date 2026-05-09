@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+from scipy.spatial.transform import Rotation, Slerp
 
 
 def relative_motion_from_world_poses(world_T_c1: np.ndarray, world_T_c2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -98,3 +99,43 @@ def align_translation_direction(t_vis: np.ndarray, t_odom: np.ndarray) -> np.nda
     if np.dot(tv.ravel(), to.ravel()) < 0:
         return -tv
     return tv
+
+
+def essential_from_R_t(R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Essential matrix E = [t]_× R for relative pose (t may be any non-zero scale)."""
+    tv = np.asarray(t, dtype=np.float64).ravel()
+    t_skew = _skew_symmetric(tv)
+    return t_skew @ np.asarray(R, dtype=np.float64)
+
+
+def blend_relative_pose(
+    R_vis: np.ndarray,
+    t_vis: np.ndarray,
+    R_gt: np.ndarray,
+    t_gt: np.ndarray,
+    alpha: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Interpolate between vision-relative SE(3) and odometry-relative SE(3).
+
+    ``alpha`` in [0, 1]: 0 uses rotation from vision + unit translation along vision direction;
+    1 uses (R_gt, t_gt); values in between use geodesic SLERP on R and a Euclidean mix on t:
+
+    ``t_blend = (1-α)·t̂_vis + α·t_gt`` with ``t̂_vis = t_vis / ||t_vis||`` (after caller alignment).
+    """
+    a = float(np.clip(alpha, 0.0, 1.0))
+    Rv = np.asarray(R_vis, dtype=np.float64)
+    Rgr = np.asarray(R_gt, dtype=np.float64)
+    rot_key = Rotation.from_matrix(np.stack([Rv, Rgr], axis=0))
+    slerp = Slerp(np.array([0.0, 1.0], dtype=np.float64), rot_key)
+    R_b = slerp([a]).as_matrix()[0]
+
+    t_vis_col = np.asarray(t_vis, dtype=np.float64).reshape(3, 1)
+    t_gt_col = np.asarray(t_gt, dtype=np.float64).reshape(3, 1)
+    nv = float(np.linalg.norm(t_vis_col))
+    if nv < 1e-12:
+        t_hat = t_vis_col
+    else:
+        t_hat = t_vis_col / nv
+    t_b = (1.0 - a) * (t_hat * 1.0) + a * t_gt_col
+    return R_b.astype(np.float64), t_b.astype(np.float64)

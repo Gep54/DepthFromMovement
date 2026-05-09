@@ -1,6 +1,6 @@
 # DepthFromMovement
 
-Bachelor thesis code: **sparse depth / structure from two-view geometry** driven by **known camera motion** (your metric trajectory). Images supply correspondences; **`motion.json`** supplies poses used for triangulation (unless you explicitly estimate relative pose from matches).
+Bachelor thesis code: **sparse depth / structure from two-view geometry** driven by **known camera motion** (your metric trajectory). Images supply correspondences; **`motion.json`** supplies poses that contribute to relative motion according to **`motion-confidence`** (see below).
 
 ---
 
@@ -8,13 +8,11 @@ Bachelor thesis code: **sparse depth / structure from two-view geometry** driven
 
 1. **Load a dataset** — Sorted RGB frames plus **`calibration.json`** (intrinsics) and **`motion.json`** (poses). Optional GT depth / poses under documented paths (`data/`).
 
-2. **Two-view pipeline** (ORB/SIFT features → matching → optional essential-matrix RANSAC):
-   - **`known_pose`** (default): relative geometry matches **`motion.json`**; points are triangulated in a common world frame using **camera→world** poses (internally inverted for projection).
-   - **`estimate_essential`**: estimates \(\mathbf{E}\) from correspondences, then uses **`motion.json`** only for **metric scale** alignment (`\|\mathbf{t}_o\| / \|\mathbf{t}_v\|`).
+2. **Two-view pipeline** (ORB/SIFT features → matching → RANSAC on the essential constraint → triangulation). A scalar **`motion_confidence`** \(\alpha\in[0,1]\) blends **relative** rotation and translation from **visual geometry** (\(\alpha\to 0\)) with **odometry-relative** \(R,\mathbf{t}\) from **`motion.json`** (\(\alpha\to 1\)). Intrinsics-distorted images may still be **undistorted internally** before detection; **`world_T_camera`** from the motion file is used to express triangulated points in the dataset world frame (the same anchoring applies when \(\alpha\) is small).
 
-3. **Exports** — Step PNGs (raw → matches → epilines → triangulation → depth visuals → trajectory → GT depth error if available). Depth colouring: **red = near**, **blue = far**, sparse points drawn with a soft halo.
+3. **Exports** — Step PNGs: raw mosaic, keypoints, matches, epilines, inlier/outlier matches, triangulation mosaic, sparse estimated depth on the reference frame, optional GT depth error. Depth colouring: **red = near**, **blue = far**.
 
-4. **Sequence mode** — Runs every consecutive pair `(0,1), (1,2), …`, writes each under **`runs/.../pairs/MMM_NNN/steps/`**, **fuses** landmarks across edges when the **same frame** sees nearby pixels (parameter **`fuse-merge-px`**), and writes **`summary/`** (full trajectory + fused top-down + fused depth on reference frame 0).
+4. **Sequence mode** — For each frame index \(j\), pairs **\((j-1,j),\,(j-2,j),\,\ldots\)** up to **`pair_lookback`** earlier frames **(default \(10\))**---a breaking change versus older versions that exported only consecutive pairs **`(k,k+1)`**. Use **`--pair-lookback 1`** to restore consecutive-only pairing. Outputs live under **`runs/.../pairs/iii_jjj/steps/`**; landmarks are **fused** across edges (**`fuse-merge-px`**); **`summary/`** contains full trajectory plus fused top-down and fused sparse depth on reference frame 0.
 
 ---
 
@@ -66,15 +64,21 @@ python -m viz.step_runner_cli <dataset_root> [options]
 Processes frames **`i`** and **`j`** only; writes PNGs under **`--run-dir/steps/`**.
 
 ```bash
-dfm-export-steps path/to/dataset --run-dir runs/demo --i 0 --j 1 --motion-mode known_pose
+dfm-export-steps path/to/dataset --run-dir runs/demo --i 0 --j 1 --motion-confidence 1
 ```
 
 #### Full sequence + fused landmarks
 
-Runs all consecutive pairs and fusion summaries:
+Default **multi-baseline** pairing (each frame with up to **10** prior frames):
 
 ```bash
 dfm-export-steps path/to/dataset --run-dir runs/demo --sequence --fuse-merge-px 4
+```
+
+Consecutive pairs only (legacy layout size):
+
+```bash
+dfm-export-steps path/to/dataset --run-dir runs/demo --sequence --pair-lookback 1
 ```
 
 | Option | Meaning |
@@ -83,13 +87,14 @@ dfm-export-steps path/to/dataset --run-dir runs/demo --sequence --fuse-merge-px 
 | **`--run-dir`** | Output directory (default: `runs/export`) |
 | **`--sequence`** | Enable multi-pair export + fusion + `summary/` artefacts |
 | **`--fuse-merge-px`** | Pixel radius for merging landmarks on shared frames when `--sequence` (default `4`) |
+| **`--pair-lookback`** | With `--sequence`: pair each frame `j` with `j-1…j-W` (default **`10`**). Use **`1`** for consecutive-only. |
 | **`--i`**, **`--j`** | Frame indices for **single-pair** mode only (defaults `0`, `1`) |
-| **`--motion-mode`** | `known_pose` or `estimate_essential` |
+| **`--motion-confidence`** | \(0\) = vision-only relative motion (no odometry alignment of translation); \(1\) = triangulation from odometry relative pose; values in between **SLERP** rotation and **linearly mix** translation with odometry (default **`1`**) |
 
 Outputs:
 
-- **Single pair:** `runs/<name>/steps/01_raw_input.png` … `11_depth_error.png` (fixed step order).
-- **Sequence:** `runs/<name>/pairs/000_001/steps/…`, …, plus `summary/trajectory_topdown_full_sequence.png`, `fused_landmarks_topdown.png`, `fused_estimated_depth_ref000.png`.
+- **Single pair:** `runs/<name>/steps/01_raw_input.png` … `08_depth_error.png` (fixed step order).
+- **Sequence:** `runs/<name>/pairs/iii_jjj/steps/…` for every generated pair, plus `summary/trajectory_topdown_full_sequence.png`, `fused_landmarks_topdown.png`, `fused_estimated_depth_ref000.png`.
 
 ### Python API (automation / notebooks)
 
@@ -100,13 +105,14 @@ from viz.step_runner import export_all_stages, export_sequence_consecutive_pairs
 
 ds = load_dataset(Path("path/to/dataset"))
 
-export_all_stages(ds, "runs/single", i=0, j=1, motion_mode="known_pose")
+export_all_stages(ds, "runs/single", i=0, j=1, motion_confidence=1.0)
 
 export_sequence_consecutive_pairs(
     ds,
     "runs/sequence",
-    motion_mode="known_pose",
+    motion_confidence=1.0,
     fuse_merge_px=4.0,
+    pair_lookback=10,
 )
 ```
 

@@ -5,21 +5,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from data.dataset import Dataset, read_image_bgr, load_gt_depth_for_frame
-from pipeline.config import FeatureConfig, MotionMode
+from data.dataset import Dataset, load_gt_depth_for_frame, read_image_bgr
+from pipeline.config import FeatureConfig, clamp_motion_confidence
 from pipeline.features import detect_and_compute
-from pipeline.geometry import essential_from_world_poses, relative_motion_from_world_poses
+from pipeline.geometry import essential_from_world_poses, invert_se3
 from pipeline.map import IncrementalMap, MapConfig, TwoViewResult
 from pipeline.fusion import FusedLandmarkMap, fused_world_points_homogeneous
-from pipeline.matching import match_pair_points
-from pipeline.triangulation import triangulate_cam1_frame
-from pipeline.geometry import (
-    estimate_essential_ransac,
-    recover_pose_from_essential,
-    scale_from_odometry,
-    align_translation_direction,
-)
-from pipeline.geometry import invert_se3
 from viz.overlays import (
     draw_epilines,
     draw_inlier_outlier_matches,
@@ -28,11 +19,10 @@ from viz.overlays import (
     estimated_depth_visualization,
     project_points_topdown,
     project_world_points_to_camera_uv_z,
-    render_depth_histogram_panel,
     render_trajectory_topdown,
     sparse_depth_error_heatmap,
 )
-from viz.recorder import PipelineRecorder, STEP_ORDER
+from viz.recorder import STEP_ORDER, PipelineRecorder
 
 
 def _undistort_if_needed(bgr: np.ndarray, ds: Dataset) -> tuple[np.ndarray, np.ndarray]:
@@ -55,13 +45,24 @@ def fundamental_from_essential(E: np.ndarray, K: np.ndarray) -> np.ndarray:
     return Kinv.T @ E @ Kinv
 
 
+def iter_sequence_pairs(n_frames: int, pair_lookback: int) -> list[tuple[int, int]]:
+    """Indices ``j`` paired with earlier frames ``j-off`` for ``off`` in ``1..min(pair_lookback, j)``."""
+    wl = max(1, int(pair_lookback))
+    out: list[tuple[int, int]] = []
+    for j in range(1, n_frames):
+        for off in range(1, min(wl, j) + 1):
+            i = j - off
+            out.append((i, j))
+    return out
+
+
 def export_single_pair_stages(
     ds: Dataset,
     pair_run_dir: str | Path,
     *,
     i: int,
     j: int,
-    motion_mode: MotionMode = "known_pose",
+    motion_confidence: float = 1.0,
     feat_cfg: FeatureConfig | None = None,
     reuse_two_view: TwoViewResult | None = None,
 ) -> None:
@@ -73,6 +74,7 @@ def export_single_pair_stages(
     reused so sequence export can fuse landmarks without duplicate solving.
     """
     feat_cfg = feat_cfg if feat_cfg is not None else ds.feature_config
+    motion_confidence = clamp_motion_confidence(motion_confidence)
     rec = PipelineRecorder(pair_run_dir)
 
     bgr_i = read_image_bgr(ds.image_paths[i])
@@ -81,10 +83,6 @@ def export_single_pair_stages(
 
     und_i, g_i = _undistort_if_needed(bgr_i, ds)
     und_j, g_j = _undistort_if_needed(bgr_j, ds)
-    if ds.calibration.dist_coeffs is not None and np.linalg.norm(ds.calibration.dist_coeffs) > 1e-9:
-        rec.write("undistort", np.hstack([und_i, und_j]))
-    else:
-        rec.write("undistort", np.hstack([bgr_i, bgr_j]))
 
     K = ds.calibration.K
     Wi = ds.world_T_camera[i]
@@ -93,48 +91,36 @@ def export_single_pair_stages(
     if reuse_two_view is not None:
         assert reuse_two_view.frame_i == i and reuse_two_view.frame_j == j
         tw = reuse_two_view
-        pts1, pts2 = tw.pts1, tw.pts2
-        kpi, di = detect_and_compute(g_i, feat_cfg)
     else:
-        kpi, di = detect_and_compute(g_i, feat_cfg)
-        kpj, dj = detect_and_compute(g_j, feat_cfg)
-        pts1, pts2, _ = match_pair_points(kpi, kpj, di, dj, feat_cfg)
+        map_cfg = MapConfig(motion_confidence=motion_confidence)
+        m = IncrementalMap(cfg=map_cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
+        tw = m.add_frame_pair(i, j, g_i, g_j)
+    pts1, pts2 = tw.pts1, tw.pts2
 
+    kpi, _ = detect_and_compute(g_i, feat_cfg)
     kp_img = draw_keypoints(und_i, np.float32([kp.pt for kp in kpi]))
     rec.write("keypoints", kp_img)
     rec.write("matches", draw_matches(und_i, und_j, pts1, pts2))
 
-    E = essential_from_world_poses(Wi, Wj, K)
-    F = fundamental_from_essential(E, K)
-    if reuse_two_view is not None:
-        epi_mask = tw.inlier_mask
-    else:
-        _, epi_mask = cv2.findEssentialMat(
-            pts1,
-            pts2,
-            K,
-            method=cv2.RANSAC,
-            prob=0.999,
-            threshold=1.0,
-        )
-    epi_inl = epi_mask.ravel().astype(bool)
+    E_viz = tw.E
+    if E_viz is None:
+        E_viz = essential_from_world_poses(Wi, Wj, K)
+    F = fundamental_from_essential(np.asarray(E_viz, dtype=np.float64), K)
+    epi_mask = tw.inlier_mask
+
     rec.write("epilines", draw_epilines(und_i, und_j, pts1, pts2, F, which="second"))
     rec.write("inlier_outlier", draw_inlier_outlier_matches(und_i, und_j, pts1, pts2, epi_mask))
 
-    if reuse_two_view is None:
-        map_cfg = MapConfig(motion_mode=motion_mode)
-        m = IncrementalMap(cfg=map_cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
-        tw = m.add_frame_pair(i, j, g_i, g_j)
     Xw = tw.X_world_h[:3, :].T
     valid = tw.cheiral_mask & np.all(np.isfinite(Xw), axis=1)
     scatter = project_points_topdown(Xw[valid] if np.any(valid) else np.zeros((0, 3)))
     repro = und_i.copy()
     Tcw_i = invert_se3(Wi)
     P = K @ np.hstack([Tcw_i[:3, :3], Tcw_i[:3, 3].reshape(3, 1)])
-    for k in range(tw.X_world_h.shape[1]):
-        if not tw.cheiral_mask[k]:
+    for kk in range(tw.X_world_h.shape[1]):
+        if not tw.cheiral_mask[kk]:
             continue
-        Xh = tw.X_world_h[:, k : k + 1]
+        Xh = tw.X_world_h[:, kk : kk + 1]
         x = P @ Xh
         u = int(x[0, 0] / (x[2, 0] + 1e-9))
         v = int(x[1, 0] / (x[2, 0] + 1e-9))
@@ -146,52 +132,16 @@ def export_single_pair_stages(
     uv_est, z_est = project_world_points_to_camera_uv_z(tw.X_world_h, tw.cheiral_mask, K, Wi)
     rec.write("estimated_depth", estimated_depth_visualization(und_i, uv_est, z_est))
 
-    if motion_mode == "estimate_essential":
-        p1i = pts1[epi_inl]
-        p2i = pts2[epi_inl]
-        if len(p1i) < 8:
-            rec.write("scale_depth", render_depth_histogram_panel(np.array([]), None))
-        else:
-            E_est, m_est = estimate_essential_ransac(p1i, p2i, K, threshold=1.0)
-            Rv, tv, _ = recover_pose_from_essential(E_est, p1i, p2i, K, mask=m_est)
-            _, t_gt = relative_motion_from_world_poses(Wi, Wj)
-            tv = align_translation_direction(tv, t_gt)
-            s, ok = scale_from_odometry(tv, t_gt)
-            m2b = m_est.ravel().astype(bool)
-            if np.count_nonzero(m2b) < 2:
-                rec.write("scale_depth", render_depth_histogram_panel(np.array([]), None))
-            else:
-                Xb, ch = triangulate_cam1_frame(p1i[m2b], p2i[m2b], K, Rv, tv)
-                zb = Xb[2, ch]
-                Xa = Xb.copy()
-                if ok:
-                    Xa[:3, :] *= s
-                za = Xa[2, ch]
-                rec.write(
-                    "scale_depth",
-                    render_depth_histogram_panel(zb, za if ok else None),
-                )
-    else:
-        Z = tw.X_world_h[2, :]
-        rec.write("scale_depth", render_depth_histogram_panel(Z, None))
-
-    traj = render_trajectory_topdown(
-        ds.world_T_camera,
-        ds.gt_world_T_camera,
-        highlight_frame_indices=(i, j),
-    )
-    rec.write("trajectory_topdown", traj)
-
     gt_depth = load_gt_depth_for_frame(ds, i)
     err_img = und_i.copy()
     if gt_depth is not None and tw.X_world_h.shape[1] > 0:
         uv_list = []
         pred_list = []
         gt_list = []
-        for k in range(tw.X_world_h.shape[1]):
-            if not tw.cheiral_mask[k]:
+        for kk in range(tw.X_world_h.shape[1]):
+            if not tw.cheiral_mask[kk]:
                 continue
-            X = tw.X_world_h[:3, k]
+            X = tw.X_world_h[:3, kk]
             Tcw = invert_se3(Wi)
             Xc = Tcw[:3, :3] @ X + Tcw[:3, 3]
             if Xc[2] <= 1e-6:
@@ -222,39 +172,47 @@ def export_all_stages(
     *,
     i: int = 0,
     j: int = 1,
-    motion_mode: MotionMode = "known_pose",
+    motion_confidence: float = 1.0,
     feat_cfg: FeatureConfig | None = None,
 ) -> None:
-    """Single pair ``(i, j)`` into flat ``run_dir/steps/`` (backwards-compatible layout)."""
-    export_single_pair_stages(ds, run_dir, i=i, j=j, motion_mode=motion_mode, feat_cfg=feat_cfg)
+    """Single pair ``(i, j)`` into flat ``run_dir/steps/``."""
+    export_single_pair_stages(
+        ds,
+        run_dir,
+        i=i,
+        j=j,
+        motion_confidence=motion_confidence,
+        feat_cfg=feat_cfg,
+    )
 
 
 def export_sequence_consecutive_pairs(
     ds: Dataset,
     run_dir: str | Path,
     *,
-    motion_mode: MotionMode = "known_pose",
+    motion_confidence: float = 1.0,
     feat_cfg: FeatureConfig | None = None,
     fuse_merge_px: float = 4.0,
+    pair_lookback: int = 10,
 ) -> list[tuple[int, int]]:
     """
-    Run consecutive pairs ``(0,1),(1,2),\\ldots,(n\\!-\\!2,n\\!-\\!1)``.
+    For each frame index ``j`` from ``1`` to ``n-1``, pair it with frames
+    ``j-1, j-2, \\ldots`` up to ``pair_lookback`` prior frames.
 
     Layout::
 
         run_dir/
           pairs/
-            000_001/steps/*.png
-            001_002/steps/*.png
-            ...
+            iii_jjj/steps/*.png
           summary/
             trajectory_topdown_full_sequence.png
-
-    Each pair folder repeats all pipeline PNGs for that slice; trajectory PNG highlights that pair.
+            fused_landmarks_topdown.png
+            fused_estimated_depth_ref000.png
 
     A shared ``IncrementalMap`` solves each edge once; ``FusedLandmarkMap`` merges landmarks that
-    re-observe the same approximate pixel on a shared frame. Summary also writes
-    ``fused_landmarks_topdown.png`` and ``fused_estimated_depth_ref000.png``.
+    re-observe the same approximate pixel on a shared frame.
+
+    Using ``pair_lookback=1`` reproduces consecutive pairs only ``(k, k+1)``.
     """
     root = Path(run_dir)
     pairs_root = root / "pairs"
@@ -266,13 +224,15 @@ def export_sequence_consecutive_pairs(
         raise ValueError(f"need at least 2 images for sequence export, got {n}")
 
     fc = feat_cfg if feat_cfg is not None else ds.feature_config
+    mc = clamp_motion_confidence(motion_confidence)
+    wl = max(1, int(pair_lookback))
     grays: list[np.ndarray] = []
     for path in ds.image_paths:
         bgr = read_image_bgr(path)
         _, g = _undistort_if_needed(bgr, ds)
         grays.append(g)
 
-    map_cfg = MapConfig(motion_mode=motion_mode)
+    map_cfg = MapConfig(motion_confidence=mc)
     inc = IncrementalMap(
         cfg=map_cfg,
         feat_cfg=fc,
@@ -282,9 +242,8 @@ def export_sequence_consecutive_pairs(
     )
     fused = FusedLandmarkMap(merge_px=fuse_merge_px)
 
-    pairs: list[tuple[int, int]] = []
-    for i in range(n - 1):
-        j = i + 1
+    pairs = iter_sequence_pairs(n, wl)
+    for i, j in pairs:
         tw = inc.add_frame_pair(i, j, grays[i], grays[j])
         fused.integrate_two_view_result(tw)
         pair_dir = pairs_root / f"{i:03d}_{j:03d}"
@@ -293,11 +252,10 @@ def export_sequence_consecutive_pairs(
             pair_dir,
             i=i,
             j=j,
-            motion_mode=motion_mode,
+            motion_confidence=mc,
             feat_cfg=fc,
             reuse_two_view=tw,
         )
-        pairs.append((i, j))
 
     traj_full = render_trajectory_topdown(
         ds.world_T_camera,
@@ -349,11 +307,12 @@ def export_sequence_consecutive_pairs(
     return pairs
 
 
-def ensure_sequence_outputs_exist(run_dir: str | Path, n_frames: int) -> None:
+def ensure_sequence_outputs_exist(run_dir: str | Path, n_frames: int, pair_lookback: int = 10) -> None:
     """Check pair step PNGs, trajectory summary, and fused-landmark summaries."""
     root = Path(run_dir)
-    for i in range(n_frames - 1):
-        ensure_all_step_pngs_exist(root / "pairs" / f"{i:03d}_{i + 1:03d}")
+    wl = max(1, int(pair_lookback))
+    for i, j in iter_sequence_pairs(n_frames, wl):
+        ensure_all_step_pngs_exist(root / "pairs" / f"{i:03d}_{j:03d}")
     sf = root / "summary" / "trajectory_topdown_full_sequence.png"
     if not sf.is_file():
         raise FileNotFoundError(f"missing sequence summary: {sf}")
