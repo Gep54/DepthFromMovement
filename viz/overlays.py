@@ -8,17 +8,26 @@ from scipy.interpolate import griddata
 
 from pipeline.geometry import invert_se3
 
-# Multi-stop BGR colormap: near (small Z) → warm colours, far (large Z) → cool colours.
+# Sparse halos on the dark panel stay compact; photo overlay uses a larger disk for visibility.
+DEFAULT_DEPTH_HALO_RADIUS_SPARSE_PX = 5
+DEPTH_HALO_PHOTO_RADIUS_MULTIPLIER = 10
+DEFAULT_DEPTH_HALO_RADIUS_PHOTO_PX = max(
+    1, int(DEFAULT_DEPTH_HALO_RADIUS_SPARSE_PX * DEPTH_HALO_PHOTO_RADIUS_MULTIPLIER)
+)
+
+# Multi-stop BGR colormap: near (small Z) → far (large Z). No saturated red (avoids clash with error cues).
 _DEPTH_BGR_STOPS = np.array(
     [
-        [0, 0, 255],
-        [0, 140, 255],
-        [0, 255, 160],
-        [230, 255, 0],
-        [255, 120, 0],
-        [255, 0, 120],
-        [200, 0, 255],
-        [255, 0, 0],
+        [0, 255, 255],
+        [0, 252, 210],
+        [40, 245, 160],
+        [90, 228, 110],
+        [160, 215, 70],
+        [240, 190, 50],
+        [255, 140, 90],
+        [255, 70, 150],
+        [240, 110, 230],
+        [210, 165, 255],
     ],
     dtype=np.float64,
 )
@@ -26,7 +35,7 @@ _DEPTH_BGR_STOPS = np.array(
 
 def depth_to_bgr_colormap(z_m: np.ndarray | float, lo_m: float, hi_m: float) -> np.ndarray:
     """
-    Piecewise-linear BGR map across several hues (richer than two-stop red–blue).
+    Piecewise-linear BGR map: **near** yellow → green → blue → **far** pink (no saturated red).
 
     Near depth ``lo_m`` uses the first stop; far ``hi_m`` uses the last. Scalar or array ``z_m``.
     Returns uint8 BGR shape ``(..., 3)`` for arrays, or ``(3,)`` for scalars.
@@ -90,7 +99,7 @@ def draw_depth_scale_bar_bottom_right(img: np.ndarray, lo_m: float, hi_m: float)
     mid_m = (lo_m + hi_m) * 0.5
     h, w = img.shape[:2]
     margin = 10
-    bar_w = 16
+    bar_w = 22
     bar_h = max(96, int(h * 0.30))
     x2 = w - margin
     x1 = x2 - bar_w
@@ -105,18 +114,19 @@ def draw_depth_scale_bar_bottom_right(img: np.ndarray, lo_m: float, hi_m: float)
         col = (int(pr[0]), int(pr[1]), int(pr[2]))
         cv2.line(img, (x1, y1 + row), (x2 - 1, y1 + row), col, 1)
     cv2.rectangle(img, (x1, y1), (x2, y2), (72, 72, 72), 1, cv2.LINE_AA)
-    fs = 0.42
+    fs = 0.78
+    thick = 2
     labels: list[tuple[str, int]] = [
-        (f"{hi_m:.2f} m", y1 - 4),
-        (f"{mid_m:.2f} m", y1 + bar_h // 2 + 5),
-        (f"{lo_m:.2f} m", y2 + 16),
+        (f"{hi_m:.2f} m", y1 - 8),
+        (f"{mid_m:.2f} m", y1 + bar_h // 2 + 8),
+        (f"{lo_m:.2f} m", y2 + 26),
     ]
-    pad = 6
+    pad = 10
     for lab, yy in labels:
-        tw, _th = cv2.getTextSize(lab, cv2.FONT_HERSHEY_SIMPLEX, fs, 1)[0]
+        tw, _th = cv2.getTextSize(lab, cv2.FONT_HERSHEY_SIMPLEX, fs, thick)[0]
         x_lab = x1 - pad - tw
         x_lab = max(margin, x_lab)
-        _put_text_outline(img, lab, (x_lab, yy), font_scale=fs)
+        _put_text_outline(img, lab, (x_lab, yy), font_scale=fs, thickness=thick)
 
 
 def blend_sparse_depth_halos_on_photo(
@@ -126,7 +136,7 @@ def blend_sparse_depth_halos_on_photo(
     lo_m: float,
     hi_m: float,
     *,
-    halo_radius: int = 5,
+    halo_radius: int = DEFAULT_DEPTH_HALO_RADIUS_PHOTO_PX,
     peak_alpha: float = 0.62,
 ) -> np.ndarray:
     """
@@ -274,13 +284,13 @@ def render_sparse_depth_pixels(
     z_lo_m: float | None = None,
     z_hi_m: float | None = None,
     percentile: tuple[float, float] = (2.0, 98.0),
-    halo_radius: int = 5,
+    halo_radius: int = DEFAULT_DEPTH_HALO_RADIUS_SPARSE_PX,
     background: Literal["dark", "photo"] = "dark",
     bgr_background: np.ndarray | None = None,
     draw_scale_bar: bool = True,
 ) -> np.ndarray:
     """
-    Colour each depth sample using :func:`depth_to_bgr_colormap` (near → warm, far → cool),
+    Colour each depth sample using :func:`depth_to_bgr_colormap` (near yellow → far pink),
     with a soft halo (lighter tints outward). Use ``halo_radius=0`` for a single-pixel dot only.
     """
     if z_cam_m.size == 0:
@@ -373,7 +383,8 @@ def estimated_depth_visualization(
     uv: np.ndarray,
     z_cam_m: np.ndarray,
     *,
-    halo_radius: int = 5,
+    halo_radius: int = DEFAULT_DEPTH_HALO_RADIUS_SPARSE_PX,
+    photo_halo_radius: int | None = None,
     show_dense_panel: bool = False,
     dense_interp: Literal["linear", "nearest"] = "linear",
     blend_alpha: float = 0.52,
@@ -384,10 +395,18 @@ def estimated_depth_visualization(
     Composite image: **sparse halos** on dark | optional **dense** interpolated map |
     photo with **local halos only** (no full-frame dense tint unless ``show_dense_panel``).
 
+    ``halo_radius`` applies to the dark sparse panel only; the photo overlay defaults to
+    ``halo_radius * DEPTH_HALO_PHOTO_RADIUS_MULTIPLIER`` (override with ``photo_halo_radius``).
+
     Depth colouring uses :func:`depth_to_bgr_colormap`; each panel draws a bottom-right metre scale.
     """
     h, w = bgr.shape[:2]
     lo, hi = depth_colormap_range_m(z_cam_m, z_percentile)
+    r_photo = (
+        int(photo_halo_radius)
+        if photo_halo_radius is not None
+        else max(1, int(halo_radius) * DEPTH_HALO_PHOTO_RADIUS_MULTIPLIER)
+    )
     sparse = render_sparse_depth_pixels(
         h,
         w,
@@ -404,7 +423,7 @@ def estimated_depth_visualization(
         z_cam_m,
         lo,
         hi,
-        halo_radius=halo_radius,
+        halo_radius=r_photo,
         peak_alpha=halo_peak_alpha,
     )
     draw_depth_scale_bar_bottom_right(photo_halos, lo, hi)
