@@ -13,6 +13,8 @@ from viz.step_runner import (
 from pipeline.fusion import FusedLandmarkMap, FusedLandmark, fused_world_points_homogeneous
 from viz.overlays import (
     blend_photo_depth_colormap,
+    depth_to_bgr_colormap,
+    draw_depth_scale_bar_bottom_right,
     draw_epilines,
     draw_matches,
     draw_keypoints,
@@ -36,7 +38,9 @@ __all__ = [
     "STEP_ORDER",
     "blend_photo_depth_colormap",
     "depth_colormap_range_m",
+    "depth_to_bgr_colormap",
     "depth_to_bgr_red_near_blue_far",
+    "draw_depth_scale_bar_bottom_right",
     "draw_epilines",
     "draw_matches",
     "draw_keypoints",

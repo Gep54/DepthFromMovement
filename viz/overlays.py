@@ -8,21 +8,160 @@ from scipy.interpolate import griddata
 
 from pipeline.geometry import invert_se3
 
-_BGR_RED_NEAR = np.array([0.0, 0.0, 255.0], dtype=np.float64)
-_BGR_BLUE_FAR = np.array([255.0, 0.0, 0.0], dtype=np.float64)
+# Multi-stop BGR colormap: near (small Z) → warm colours, far (large Z) → cool colours.
+_DEPTH_BGR_STOPS = np.array(
+    [
+        [0, 0, 255],
+        [0, 140, 255],
+        [0, 255, 160],
+        [230, 255, 0],
+        [255, 120, 0],
+        [255, 0, 120],
+        [200, 0, 255],
+        [255, 0, 0],
+    ],
+    dtype=np.float64,
+)
+
+
+def depth_to_bgr_colormap(z_m: np.ndarray | float, lo_m: float, hi_m: float) -> np.ndarray:
+    """
+    Piecewise-linear BGR map across several hues (richer than two-stop red–blue).
+
+    Near depth ``lo_m`` uses the first stop; far ``hi_m`` uses the last. Scalar or array ``z_m``.
+    Returns uint8 BGR shape ``(..., 3)`` for arrays, or ``(3,)`` for scalars.
+    """
+    z = np.asarray(z_m, dtype=np.float64)
+    scalar_in = z.ndim == 0
+    shape_z = z.shape
+    zf = z.reshape(-1)
+    t = (zf - lo_m) / (hi_m - lo_m + 1e-12)
+    t = np.clip(t, 0.0, 1.0)
+    stops = _DEPTH_BGR_STOPS
+    nseg = stops.shape[0] - 1
+    s = t * nseg
+    i = np.minimum(np.floor(s).astype(np.int32), nseg - 1)
+    f = s - i
+    f = np.clip(f, 0.0, 1.0)
+    c0 = stops[i]
+    c1 = stops[i + 1]
+    out = (1.0 - f[:, np.newaxis]) * c0 + f[:, np.newaxis] * c1
+    out_u8 = np.clip(np.round(out), 0, 255).astype(np.uint8)
+    if scalar_in:
+        return out_u8[0]
+    return out_u8.reshape(shape_z + (3,))
 
 
 def depth_to_bgr_red_near_blue_far(z_m: np.ndarray | float, lo_m: float, hi_m: float) -> np.ndarray:
-    """
-    Linear BGR: **closest** depth → saturated red, **farthest** → saturated blue.
+    """Backward-compatible name; uses :func:`depth_to_bgr_colormap`."""
+    return depth_to_bgr_colormap(z_m, lo_m, hi_m)
 
-    ``z_m`` may be a scalar or any shaped array; returns shape ``(..., 3)`` uint8 BGR.
+
+def _put_text_outline(
+    img: np.ndarray,
+    text: str,
+    org: tuple[int, int],
+    *,
+    font_scale: float = 0.42,
+    color: tuple[int, int, int] = (248, 248, 248),
+    outline: tuple[int, int, int] = (22, 22, 22),
+    thickness: int = 1,
+) -> None:
+    x, y = org
+    for ox, oy in ((-1, -1), (-1, 1), (1, -1), (1, 1), (-1, 0), (1, 0), (0, -1), (0, 1)):
+        cv2.putText(
+            img,
+            text,
+            (x + ox, y + oy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            outline,
+            thickness + 1,
+            cv2.LINE_AA,
+        )
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
+
+
+def draw_depth_scale_bar_bottom_right(img: np.ndarray, lo_m: float, hi_m: float) -> None:
     """
-    z = np.asarray(z_m, dtype=np.float64)
-    t = (z - lo_m) / (hi_m - lo_m + 1e-12)
-    t = np.clip(t, 0.0, 1.0)
-    base = (1.0 - t)[..., np.newaxis] * _BGR_RED_NEAR + t[..., np.newaxis] * _BGR_BLUE_FAR
-    return np.clip(np.round(base), 0, 255).astype(np.uint8)
+    Vertical colour strip **bottom-right**: **top** = farthest ``hi_m``, **bottom** = nearest ``lo_m``,
+    matching :func:`depth_to_bgr_colormap`. Labels max / mid / min depth in metres to the left of the bar.
+    """
+    mid_m = (lo_m + hi_m) * 0.5
+    h, w = img.shape[:2]
+    margin = 10
+    bar_w = 16
+    bar_h = max(96, int(h * 0.30))
+    x2 = w - margin
+    x1 = x2 - bar_w
+    y2 = h - margin
+    y1 = max(margin + 40, y2 - bar_h)
+    bar_h = y2 - y1
+    for row in range(bar_h):
+        frac = row / max(bar_h - 1, 1)
+        z_at = hi_m * (1.0 - frac) + lo_m * frac
+        pix = depth_to_bgr_colormap(z_at, lo_m, hi_m)
+        pr = np.asarray(pix, dtype=np.int32).reshape(-1)
+        col = (int(pr[0]), int(pr[1]), int(pr[2]))
+        cv2.line(img, (x1, y1 + row), (x2 - 1, y1 + row), col, 1)
+    cv2.rectangle(img, (x1, y1), (x2, y2), (72, 72, 72), 1, cv2.LINE_AA)
+    fs = 0.42
+    labels: list[tuple[str, int]] = [
+        (f"{hi_m:.2f} m", y1 - 4),
+        (f"{mid_m:.2f} m", y1 + bar_h // 2 + 5),
+        (f"{lo_m:.2f} m", y2 + 16),
+    ]
+    pad = 6
+    for lab, yy in labels:
+        tw, _th = cv2.getTextSize(lab, cv2.FONT_HERSHEY_SIMPLEX, fs, 1)[0]
+        x_lab = x1 - pad - tw
+        x_lab = max(margin, x_lab)
+        _put_text_outline(img, lab, (x_lab, yy), font_scale=fs)
+
+
+def blend_sparse_depth_halos_on_photo(
+    bgr: np.ndarray,
+    uv: np.ndarray,
+    z_cam_m: np.ndarray,
+    lo_m: float,
+    hi_m: float,
+    *,
+    halo_radius: int = 5,
+    peak_alpha: float = 0.62,
+) -> np.ndarray:
+    """
+    Blend depth halos **only** near each sample (disk ``halo_radius``); photo stays untouched elsewhere.
+    Uses the same radial tint falloff as :func:`draw_depth_point_halo`.
+    """
+    out = bgr.astype(np.float64).copy()
+    hh, ww = bgr.shape[:2]
+    hr = max(0, int(halo_radius))
+    mx = max(hr, 1)
+    pa = float(np.clip(peak_alpha, 0.0, 1.0))
+    for k in range(len(z_cam_m)):
+        z = float(z_cam_m[k])
+        if not np.isfinite(z) or z <= 0:
+            continue
+        uc = int(round(float(uv[k, 0])))
+        vc = int(round(float(uv[k, 1])))
+        base = depth_to_bgr_colormap(z, lo_m, hi_m).astype(np.float64).reshape(3)
+        v0, v1 = max(0, vc - hr), min(hh, vc + hr + 1)
+        u0, u1 = max(0, uc - hr), min(ww, uc + hr + 1)
+        for vv in range(v0, v1):
+            dy = vv - vc
+            for uu in range(u0, u1):
+                dx = uu - uc
+                dist_sq = dx * dx + dy * dy
+                if dist_sq > hr * hr:
+                    continue
+                dist = float(np.sqrt(dist_sq))
+                wf = (dist / mx) ** 1.12
+                wf = float(min(0.92, wf))
+                col = blend_bgr_toward_white(base, wf).astype(np.float64)
+                a = pa * (1.0 - wf / 0.92) if wf > 1e-9 else pa
+                a = float(np.clip(a, 0.0, pa))
+                out[vv, uu] = out[vv, uu] * (1.0 - a) + col * a
+    return np.clip(np.round(out), 0, 255).astype(np.uint8)
 
 
 def blend_bgr_toward_white(bgr: np.ndarray, white_frac: float) -> np.ndarray:
@@ -45,7 +184,7 @@ def draw_depth_point_halo(
     outer_radius: int,
 ) -> None:
     """Filled circles from outer (lighter) to inner (full depth colour)."""
-    base = depth_to_bgr_red_near_blue_far(z_m, lo_m, hi_m).reshape(3)
+    base = depth_to_bgr_colormap(z_m, lo_m, hi_m).reshape(3)
     h, w = canvas.shape[:2]
     if not (0 <= u < w and 0 <= v < h):
         return
@@ -135,13 +274,14 @@ def render_sparse_depth_pixels(
     z_lo_m: float | None = None,
     z_hi_m: float | None = None,
     percentile: tuple[float, float] = (2.0, 98.0),
-    halo_radius: int = 10,
+    halo_radius: int = 5,
     background: Literal["dark", "photo"] = "dark",
     bgr_background: np.ndarray | None = None,
+    draw_scale_bar: bool = True,
 ) -> np.ndarray:
     """
-    Colour each depth sample **red = near**, **blue = far**, with a soft halo (lighter tints
-    of the same hue outward). Use ``halo_radius=0`` for a single-pixel dot only.
+    Colour each depth sample using :func:`depth_to_bgr_colormap` (near → warm, far → cool),
+    with a soft halo (lighter tints outward). Use ``halo_radius=0`` for a single-pixel dot only.
     """
     if z_cam_m.size == 0:
         canvas = np.zeros((height, width, 3), dtype=np.uint8)
@@ -162,16 +302,8 @@ def render_sparse_depth_pixels(
             continue
         u, v = int(round(float(uv[k, 0]))), int(round(float(uv[k, 1])))
         draw_depth_point_halo(canvas, u, v, z, lo, hi, outer_radius=hr)
-    cv2.putText(
-        canvas,
-        f"Z {lo:.3f}..{hi:.3f} m  red=near blue=far",
-        (10, height - 14),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
-        (240, 240, 240),
-        2,
-        cv2.LINE_AA,
-    )
+    if draw_scale_bar:
+        draw_depth_scale_bar_bottom_right(canvas, lo, hi)
     return canvas
 
 
@@ -185,10 +317,11 @@ def render_dense_depth_colormap(
     z_hi_m: float | None = None,
     percentile: tuple[float, float] = (2.0, 98.0),
     interp: Literal["linear", "nearest"] = "linear",
+    draw_scale_bar: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Interpolate sparse depths to a full raster (linear with nearest-NaN fill), then colour with
-    **red=near, blue=far** (same linear mapping as sparse halos).
+    :func:`depth_to_bgr_colormap`.
 
     Returns ``(bgr, z_map_m)`` where ``z_map_m`` is NaN outside the sampled hull / extrapolation.
     """
@@ -213,18 +346,10 @@ def render_dense_depth_colormap(
     valid = np.isfinite(zi) & (zi > 0)
     color = np.full((height, width, 3), 12, dtype=np.uint8)
     if np.any(valid):
-        rgb_layer = depth_to_bgr_red_near_blue_far(zi, lo, hi)
+        rgb_layer = depth_to_bgr_colormap(zi, lo, hi)
         color = np.where(valid[..., np.newaxis], rgb_layer, color)
-    cv2.putText(
-        color,
-        f"dense Z {lo:.3f}..{hi:.3f} m  red=near blue=far",
-        (10, height - 14),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
-        (240, 240, 240),
-        2,
-        cv2.LINE_AA,
-    )
+    if draw_scale_bar:
+        draw_depth_scale_bar_bottom_right(color, lo, hi)
     return color, zi
 
 
@@ -248,16 +373,18 @@ def estimated_depth_visualization(
     uv: np.ndarray,
     z_cam_m: np.ndarray,
     *,
-    halo_radius: int = 10,
+    halo_radius: int = 5,
+    show_dense_panel: bool = False,
     dense_interp: Literal["linear", "nearest"] = "linear",
     blend_alpha: float = 0.52,
+    halo_peak_alpha: float = 0.62,
     z_percentile: tuple[float, float] = (2.0, 98.0),
 ) -> np.ndarray:
     """
-    Composite image: **sparse per-pixel** depth colours | **dense** interpolated map |
-    dense overlay blended on the photo (three panels horizontally).
+    Composite image: **sparse halos** on dark | optional **dense** interpolated map |
+    photo with **local halos only** (no full-frame dense tint unless ``show_dense_panel``).
 
-    Encoding: **red = nearest**, **blue = farthest** (camera-frame depth). Sparse dots use a light halo.
+    Depth colouring uses :func:`depth_to_bgr_colormap`; each panel draws a bottom-right metre scale.
     """
     h, w = bgr.shape[:2]
     lo, hi = depth_colormap_range_m(z_cam_m, z_percentile)
@@ -271,13 +398,25 @@ def estimated_depth_visualization(
         halo_radius=halo_radius,
         background="dark",
     )
+    photo_halos = blend_sparse_depth_halos_on_photo(
+        bgr,
+        uv,
+        z_cam_m,
+        lo,
+        hi,
+        halo_radius=halo_radius,
+        peak_alpha=halo_peak_alpha,
+    )
+    draw_depth_scale_bar_bottom_right(photo_halos, lo, hi)
+    if not show_dense_panel:
+        return np.hstack([sparse, photo_halos])
     dense_bgr, zi = render_dense_depth_colormap(
         h, w, uv, z_cam_m, z_lo_m=lo, z_hi_m=hi, interp=dense_interp
     )
     valid = np.isfinite(zi) & (zi > 0)
     fused = blend_photo_depth_colormap(bgr, dense_bgr, valid, alpha=blend_alpha)
-    panels = [sparse, dense_bgr, fused]
-    return np.hstack(panels)
+    draw_depth_scale_bar_bottom_right(fused, lo, hi)
+    return np.hstack([sparse, dense_bgr, fused])
 
 
 def draw_keypoints(bgr: np.ndarray, pts: np.ndarray, color=(0, 255, 0)) -> np.ndarray:
