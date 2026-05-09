@@ -47,6 +47,8 @@ class TwoViewResult:
     X_world_h: np.ndarray
     cheiral_mask: np.ndarray
     reproj: dict[str, float]
+    """Rows aligned with columns of ``X_world_h`` (inlier correspondences); invalid rows ignored."""
+    descriptors: np.ndarray | None = None
 
 
 @dataclass
@@ -83,7 +85,12 @@ class IncrementalMap:
             kpj, dj = features_j.keypoints, features_j.descriptors
         else:
             kpj, dj = detect_and_compute(gray_j, self.feat_cfg)
-        pts1, pts2, _ = match_pair_points(kpi, kpj, di, dj, self.feat_cfg)
+        pts1, pts2, matches = match_pair_points(kpi, kpj, di, dj, self.feat_cfg)
+        if matches and di is not None:
+            desc_rows = np.stack([np.asarray(di[m.queryIdx]) for m in matches], axis=0)
+        else:
+            d_dim = int(di.shape[1]) if di is not None else 0
+            desc_rows = np.empty((0, d_dim), dtype=di.dtype if di is not None else np.uint8)
         if len(pts1) < 8:
             empty = np.zeros((4, 0), np.float64)
             return TwoViewResult(
@@ -100,6 +107,7 @@ class IncrementalMap:
                 X_world_h=empty,
                 cheiral_mask=np.zeros((0,), bool),
                 reproj={},
+                descriptors=None,
             )
 
         Wi = self.world_T_camera[i]
@@ -124,6 +132,7 @@ class IncrementalMap:
         inlier = mask.ravel().astype(bool)
         pts1_i = pts1[inlier]
         pts2_i = pts2[inlier]
+        desc_inlier = desc_rows[inlier] if desc_rows.shape[0] else np.empty((0, desc_rows.shape[1]), dtype=desc_rows.dtype)
 
         def _failure_result(E_store: np.ndarray | None) -> TwoViewResult:
             empty_h = np.zeros((4, 0), np.float64)
@@ -141,6 +150,11 @@ class IncrementalMap:
                 X_world_h=empty_h,
                 cheiral_mask=np.zeros((0,), bool),
                 reproj={},
+                descriptors=(
+                    np.empty((0, desc_inlier.shape[1]), dtype=desc_inlier.dtype)
+                    if desc_inlier.shape[1] > 0
+                    else None
+                ),
             )
 
         if pts1_i.shape[0] == 0:
@@ -181,6 +195,7 @@ class IncrementalMap:
             X_world_h=X_h,
             cheiral_mask=cheiral,
             reproj=reproj,
+            descriptors=desc_inlier,
         )
         self.pair_results.append(res)
         while len(self.pair_results) > self.window:

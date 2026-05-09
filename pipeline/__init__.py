@@ -12,6 +12,13 @@ from pipeline.geometry import (
 )
 from pipeline.triangulation import triangulate_world_points, triangulate_cam1_frame, cam1_to_world_points
 from pipeline.map import IncrementalMap, MapConfig, TwoViewResult
+from pipeline.descriptor_landmark_map import (
+    DescriptorLandmark,
+    DescriptorLandmarkMap,
+    DescriptorMapConfig,
+    export_landmarks_csv,
+    world_point_to_cam0,
+)
 from pipeline.fusion import FusedLandmarkMap, FusedLandmark, fused_world_points_homogeneous
 from pipeline.metrics import reprojection_errors, summarize_reprojection
 
@@ -37,6 +44,11 @@ __all__ = [
     "TwoViewResult",
     "FusedLandmarkMap",
     "FusedLandmark",
+    "DescriptorLandmark",
+    "DescriptorLandmarkMap",
+    "DescriptorMapConfig",
+    "export_landmarks_csv",
+    "world_point_to_cam0",
     "fused_world_points_homogeneous",
     "reprojection_errors",
     "summarize_reprojection",

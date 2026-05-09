@@ -19,6 +19,7 @@ dev = ["pytest>=7.4"]
 
 [project.scripts]
 dfm-export-steps = "viz.step_runner_cli:main"
+dfm-descriptor-map = "viz.descriptor_map_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["data", "pipeline", "viz"]

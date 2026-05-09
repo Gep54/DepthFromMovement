@@ -26,7 +26,7 @@ Point the CLI at a folder that contains:
 | **`motion.json`** | Per-frame **camera→world** pose (`world_T_camera`): \(\mathbf{X}_w = \mathbf{R}\mathbf{X}_c + \mathbf{t}\). Fields: `pose_convention`, `representation` (`absolute` or `relative_to_prev`), `frames[]` with `T` (4×4 or 3×4) |
 | **`images/`** | Frames (`*.png` by default); if empty, the loader also searches image files in the dataset root |
 
-Optional: **`features.json`** — detector/matcher settings (ORB vs SIFT, counts, Lowe ratio, cross-check, ORB pyramid / SIFT contrast); omitted keys use library defaults (same as **`FeatureConfig`**). **`gt_depth/`** (depth maps named like image stems), **`gt_poses.txt`** (TUM-style; length must match image count).
+Optional: **`features.json`** — detector/matcher settings (ORB vs SIFT, counts, Lowe ratio, cross-check, ORB pyramid / SIFT contrast); omitted keys use library defaults (same as **`FeatureConfig`**). **`descriptor_map.json`** (optional) — knobs for **`dfm-descriptor-map`**: **`merge_beta`** (`null` = incremental arithmetic mean via \(1/(n+1)\)), **`max_match_distance`**, **`ratio_second_best`**. **`gt_depth/`** (depth maps named like image stems), **`gt_poses.txt`** (TUM-style; length must match image count).
 
 Helper (optional): **`scripts/init_test_dataset_motion.py`** — builds `motion.json` from image count when you only need a synthetic baseline.
 
@@ -53,11 +53,30 @@ pytest tests
 
 ### Command-line (primary)
 
-After `pip install -e .`, the entry point is **`dfm-export-steps`**. Equivalent module invocation:
+After `pip install -e .`, entry points are **`dfm-export-steps`** (visual step PNGs / sequence export) and **`dfm-descriptor-map`** (descriptor landmark map + CSV). Example module invocations:
 
 ```bash
 python -m viz.step_runner_cli <dataset_root> [options]
+python -m viz.descriptor_map_cli <dataset_root> [options]
 ```
+
+### Descriptor landmark map (`dfm-descriptor-map`)
+
+Separate from **`dfm-export-steps`**: builds a **sparse 3D map in camera-0 coordinates** (origin at the first camera centre). Uses the **same multi-baseline pairing** as sequence mode (`iter_sequence_pairs`, default **`--pair-lookback 10`**). Each triangulated point carries its ORB/SIFT descriptor from the **first view of the pair**; landmarks are **associated by nearest-neighbour descriptor distance**, positions updated with **EMA** — default **`merge_beta`** omitted/`null` ⇒ weights **`1/(n+1)`** (same as incremental mean); a numeric **`--merge-beta`** fixes classical EMA. **Prototype descriptors** use **replace-if-better**. **CLI overrides** optional **`descriptor_map.json`**.
+
+```bash
+dfm-descriptor-map path/to/dataset --run-dir runs/dmap --export-csv runs/dmap/landmarks.csv --iter-viz
+```
+
+| Option | Meaning |
+|--------|---------|
+| **`--run-dir`** | Output root (writes **`descriptor_map/`** with PNGs inside) |
+| **`--motion-confidence`**, **`--pair-lookback`** | Same semantics as sequence export |
+| **`--merge-beta`** | Fixed EMA \(\beta\); omit for mean-equivalent behaviour |
+| **`--descriptor-max-dist`** | Override NN association threshold (Hamming ORB / L2 SIFT) |
+| **`--descriptor-map-config`** | Path to JSON (default tries **`<dataset>/descriptor_map.json`**) |
+| **`--export-csv`** | Landmark table: id, cam0 XYZ, **`n_updates`**, descriptor hex |
+| **`--iter-viz`** | Extra PNG per processed pair under **`descriptor_map/iter/`** |
 
 #### Single pair (default)
 
