@@ -47,6 +47,36 @@ pip install -e ".[dev]"
 pytest tests
 ```
 
+### ROS 2 package (optional)
+
+The **`ros2_ws/`** colcon workspace contains **`incremental_vo_ros2`**: a node that subscribes to a monocular image and fused odometry, selects **keyframes** when the platform has moved at least **`keyframe_distance_m`** (default **0.5** m), runs the same **`pipeline.IncrementalMap`** two-view step as the offline exporter between consecutive keyframes, and on shutdown writes artefacts under **`output_root/ros2_runs/run_<timestamp>/`**: **`images/`** (PNG keyframes), **`position.json`**, and **`sparse_map.npz`**. The process must be able to import **`pipeline.*`** from this repository (the node walks parent directories until it finds **`pipeline/map.py`**).
+
+**Build (from `ros2_ws/`, with your ROS 2 distro already on `PATH`):**
+
+```bash
+colcon build --packages-select incremental_vo_ros2
+```
+
+On **Linux** or **macOS** you may add **`--symlink-install`** so Python sources stay linked into the build tree (faster iteration). On **Windows**, skip that flag unless **Developer Mode** is on (Settings → *Privacy & security* → *For developers*): otherwise `colcon` can fail with **WinError 1314** (“client does not hold a required privilege”) when creating symlinks. If a build failed partway, delete `build/incremental_vo_ros2` and `install/incremental_vo_ros2` (or the whole `build/` / `install/` trees) and rebuild before sourcing `install` again.
+
+**Overlay the workspace** (each new terminal):
+
+- **Windows (Command Prompt):** from `ros2_ws`, run `install\setup.bat`.
+- **Windows (PowerShell):** from `ros2_ws`, run `.\install\setup.ps1` so the environment applies to the current session (`setup.bat` alone does not persist variables into an already-open PowerShell window).
+- **Linux / WSL:** `source install/setup.bash`
+
+When sourcing the overlay, you may see **RTI Connext DDS** warnings about `rtisetenv_x64Win64VS2017.bat` missing. That only means the optional RTI vendor stack is not installed; **ROS 2 still works** with the default middleware (e.g. **Fast DDS**). You can ignore the message unless you explicitly use RTI Connext.
+
+**Run the node:**
+
+```bash
+ros2 run incremental_vo_ros2 incremental_vo_node
+```
+
+Useful **`--ros-args`** parameters include **`-p use_sim_time:=true`** when playing a rosbag with **`ros2 bag play … --clock`**, **`-p output_root:=…`**, **`-p keyframe_distance_m:=0.5`**, and topic overrides (**`-p image_topic:=…`**, **`-p odom_main_topic:=…`**). Optional simulator odom: **`-p subscribe_odom_gt:=true`**.
+
+The thesis **`pipeline/`** module (imported when building the map) depends on **SciPy**. If you see **`ModuleNotFoundError: scipy`**, install into the **same Python environment** that runs `ros2` (e.g. `pixi add scipy` in your ROS env, or `python -m pip install -r src/incremental_vo_ros2/requirements.txt` using that interpreter), then rebuild or restart the node.
+
 ---
 
 ## How to run it
@@ -146,3 +176,4 @@ Lower-level pieces live under **`pipeline/`** (geometry, triangulation, fusion),
 | **`data/`** | Schema, JSON loaders, dataset validation |
 | **`pipeline/`** | Features, matching, two-view geometry, triangulation, incremental map, landmark fusion |
 | **`viz/`** | Step recorder, overlays, export orchestration, CLI |
+| **`ros2_ws/src/incremental_vo_ros2/`** | Optional ROS 2 (Jazzy-compatible) Python node: live or rosbag streams → odometric keyframes → **`IncrementalMap`**; run outputs under **`ros2_runs/`** |

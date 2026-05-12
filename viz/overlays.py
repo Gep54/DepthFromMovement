@@ -99,7 +99,7 @@ def draw_depth_scale_bar_bottom_right(img: np.ndarray, lo_m: float, hi_m: float)
     mid_m = (lo_m + hi_m) * 0.5
     h, w = img.shape[:2]
     margin = 10
-    bar_w = 22
+    bar_w = 88
     bar_h = max(96, int(h * 0.30))
     x2 = w - margin
     x1 = x2 - bar_w
@@ -114,8 +114,8 @@ def draw_depth_scale_bar_bottom_right(img: np.ndarray, lo_m: float, hi_m: float)
         col = (int(pr[0]), int(pr[1]), int(pr[2]))
         cv2.line(img, (x1, y1 + row), (x2 - 1, y1 + row), col, 1)
     cv2.rectangle(img, (x1, y1), (x2, y2), (72, 72, 72), 1, cv2.LINE_AA)
-    fs = 0.78
-    thick = 2
+    fs = 0.88
+    thick = 8
     labels: list[tuple[str, int]] = [
         (f"{hi_m:.2f} m", y1 - 8),
         (f"{mid_m:.2f} m", y1 + bar_h // 2 + 8),
