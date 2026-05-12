@@ -27,7 +27,7 @@ Point the CLI at a folder that contains:
 | **`calibration.json`** | `K` (3×3), optional `dist_coeffs`, optional `image_size` |
 | **`motion.json`** | Per-frame **camera→world** pose (`world_T_camera`): \(\mathbf{X}_w = \mathbf{R}\mathbf{X}_c + \mathbf{t}\). Fields: `pose_convention`, `representation` (`absolute` or `relative_to_prev`), `frames[]` with `T` (4×4 or 3×4) |
 | **`provided_motion.json`** (optional) | Second pose track, **same schema** as **`motion.json`**, one transform per image. Fused with the primary track per **`fusion.json`** when both files exist. |
-| **`fusion.json`** (optional) | Offline fusion: **`method`** (`odom_only`, `provided_if_available`, `position_blend`) and optional **`position_blend_weight`** in \([0,1]\) (weight on provided translation for **`position_blend`**). Ignored if **`provided_motion.json`** is absent. |
+| **`fusion.json`** (optional) | Offline fusion: **`method`** (`odom_only`, `provided_if_available`, `position_blend`; default **`position_blend`** when this file is missing but **`provided_motion.json`** exists) and optional **`position_blend_weight`** in \([0,1]\) (weight on provided translation for **`position_blend`**). Ignored if **`provided_motion.json`** is absent. |
 | **`images/`** | Frames (`*.png` by default); if empty, the loader also searches image files in the dataset root |
 
 Optional: **`features.json`** — detector/matcher settings (ORB vs SIFT, counts, Lowe ratio, cross-check, ORB pyramid / SIFT contrast); omitted keys use library defaults (same as **`FeatureConfig`**). **`descriptor_map.json`** (optional) — knobs for **`dfm-descriptor-map`**: **`merge_beta`** (`null` = incremental arithmetic mean via \(1/(n+1)\)), **`max_match_distance`**, **`ratio_second_best`**. **`gt_depth/`** (depth maps named like image stems), **`gt_poses.txt`** (TUM-style; length must match image count).
@@ -77,7 +77,7 @@ When sourcing the overlay, you may see **RTI Connext DDS** warnings about `rtise
 ros2 run incremental_vo_ros2 incremental_vo_node
 ```
 
-Useful **`--ros-args`** parameters include **`-p use_sim_time:=true`** when playing a rosbag with **`ros2 bag play … --clock`**, **`-p output_root:=…`**, **`-p keyframe_distance_m:=0.5`**, topic overrides (**`-p image_topic:=…`**, **`-p odom_main_topic:=…`**), and fusion (**`-p fusion_method:=position_blend`**, **`-p fusion_position_blend_weight:=0.3`**, **`-p provided_pose_topic:=/my/pose`**). Optional simulator odom: **`-p subscribe_odom_gt:=true`**.
+Useful **`--ros-args`** parameters include **`-p use_sim_time:=true`** when playing a rosbag with **`ros2 bag play … --clock`**, **`-p output_root:=…`**, **`-p keyframe_distance_m:=0.5`**, topic overrides (**`-p image_topic:=…`**, **`-p odom_main_topic:=…`**), and fusion (**`-p fusion_method:=odom_only`** to ignore a second pose, **`-p fusion_position_blend_weight:=0.3`**, **`-p provided_pose_topic:=/my/pose`**). Default **`fusion_method`** is **`position_blend`** (equivalent to odometry-only translation when no **`provided_pose_topic`** / messages). Optional simulator odom: **`-p subscribe_odom_gt:=true`**.
 
 The thesis **`pipeline/`** module (imported when building the map) depends on **SciPy**. If you see **`ModuleNotFoundError: scipy`**, install into the **same Python environment** that runs `ros2` (e.g. `pixi add scipy` in your ROS env, or `python -m pip install -r src/incremental_vo_ros2/requirements.txt` using that interpreter), then rebuild or restart the node.
 

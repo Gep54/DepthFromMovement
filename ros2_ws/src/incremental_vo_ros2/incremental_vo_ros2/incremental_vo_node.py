@@ -101,7 +101,7 @@ class IncrementalVoNode(Node):
         self.declare_parameter("log_image_hz", 0.0)
 
         # Metric pose fusion (odometry vs optional external ``world_T_camera``).
-        self.declare_parameter("fusion_method", "odom_only")
+        self.declare_parameter("fusion_method", "position_blend")
         self.declare_parameter("fusion_position_blend_weight", 0.5)
         self.declare_parameter("provided_pose_topic", "")
 
