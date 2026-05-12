@@ -72,6 +72,10 @@ class DatasetPaths:
     gt_depth_dir: Path | None = None
     gt_poses_file: Path | None = None
     image_glob: str = "*.png"
+    """Optional second pose track (same schema as ``motion.json``) for offline metric fusion."""
+    provided_motion_file: Path | None = None
+    """Optional ``fusion.json``: ``method``, ``position_blend_weight``."""
+    fusion_file: Path | None = None
 
 
 def default_dataset_paths(root: str | Path) -> DatasetPaths:
@@ -84,6 +88,8 @@ def default_dataset_paths(root: str | Path) -> DatasetPaths:
         features_file=r / "features.json",
         gt_depth_dir=r / "gt_depth" if (r / "gt_depth").is_dir() else None,
         gt_poses_file=r / "gt_poses.txt" if (r / "gt_poses.txt").is_file() else None,
+        provided_motion_file=r / "provided_motion.json",
+        fusion_file=r / "fusion.json",
     )
 
 

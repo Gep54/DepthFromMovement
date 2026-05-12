@@ -7,15 +7,18 @@ from typing import Sequence
 import numpy as np
 
 from data.feature_matching_json import load_feature_matching_json
+from data.fusion_json import default_fusion_config, load_fusion_json
 from data.gt_io import load_gt_depth, load_tum_poses, tum_rows_to_world_T_camera
 from data.io_json import load_calibration_json, load_motion_json, world_T_camera_from_motion
 from pipeline.config import FeatureConfig
+from pipeline.metric_fusion import fuse_pose_sequence
 from data.schema import (
     Calibration,
     DatasetPaths,
     MotionSpec,
     default_dataset_paths,
     validate_dataset_consistency,
+    validate_motion_vs_images,
 )
 
 
@@ -82,6 +85,8 @@ def load_dataset(
             gt_depth_dir=p.gt_depth_dir,
             gt_poses_file=p.gt_poses_file,
             image_glob=image_glob,
+            provided_motion_file=p.provided_motion_file,
+            fusion_file=p.fusion_file,
         )
     root_p = Path(p.root)
     if not root_p.is_dir():
@@ -109,10 +114,27 @@ def load_dataset(
 
     calibration = load_calibration_json(p.calibration_file)
     motion = load_motion_json(p.motion_file)
-    world_T_camera = world_T_camera_from_motion(motion)
-
     if validate:
         validate_dataset_consistency(calibration, motion, image_paths)
+
+    world_T_camera = world_T_camera_from_motion(motion)
+
+    fusion_cfg = default_fusion_config()
+    if p.fusion_file is not None and p.fusion_file.is_file():
+        fusion_cfg = load_fusion_json(p.fusion_file)
+
+    prov_path = p.provided_motion_file
+    if prov_path is not None and prov_path.is_file():
+        motion_provided = load_motion_json(prov_path)
+        if validate:
+            validate_motion_vs_images(motion_provided, len(image_paths))
+        wt_provided = world_T_camera_from_motion(motion_provided)
+        world_T_camera = fuse_pose_sequence(
+            world_T_camera,
+            wt_provided,
+            str(fusion_cfg["method"]),
+            position_blend_weight=float(fusion_cfg["position_blend_weight"]),
+        )
 
     feature_config = FeatureConfig()
     if p.features_file.is_file():

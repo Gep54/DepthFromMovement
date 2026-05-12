@@ -21,6 +21,12 @@ from pipeline.descriptor_landmark_map import (
 )
 from pipeline.fusion import FusedLandmarkMap, FusedLandmark, fused_world_points_homogeneous
 from pipeline.metrics import reprojection_errors, summarize_reprojection
+from pipeline.metric_fusion import (
+    create_metric_pose_fusion,
+    fuse_pose_sequence,
+    fused_pose_from_pair,
+    list_registered_metric_fusion_methods,
+)
 
 __all__ = [
     "FeatureConfig",
@@ -52,4 +58,8 @@ __all__ = [
     "fused_world_points_homogeneous",
     "reprojection_errors",
     "summarize_reprojection",
+    "create_metric_pose_fusion",
+    "fuse_pose_sequence",
+    "fused_pose_from_pair",
+    "list_registered_metric_fusion_methods",
 ]

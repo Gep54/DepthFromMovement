@@ -3,7 +3,7 @@
 <package format="3">
   <name>incremental_vo_ros2</name>
   <version>0.1.0</version>
-  <description>Skeleton ROS 2 node for incremental visual odometry (image, odom, TF, ground-truth odom).</description>
+  <description>ROS 2 node: live sparse 3D mapping from monocular images + metric pose fusion + two-view triangulation.</description>
   <maintainer email="user@example.com">maintainer</maintainer>
   <license>Apache-2.0</license>
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "depth-from-movement"
 version = "0.1.0"
-description = "Feature-based incremental depth / structure from motion with metric motion"
+description = "Live sparse 3D mapping from monocular images + metric motion; optional fusion of odometry with a second pose track. Offline replay via JSON datasets and dfm-export-steps."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
