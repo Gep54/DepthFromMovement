@@ -16,7 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -87,11 +87,11 @@ class IncrementalVoNode(Node):
         self.declare_parameter("keyframe_distance_m", 0.5)
         self.declare_parameter("output_root", ".")
         self.declare_parameter("max_image_buffer", 400)
-        self.declare_parameter("motion_confidence", 1.0)
         self.declare_parameter("camera_fx", 600.0)
         self.declare_parameter("camera_fy", 600.0)
         self.declare_parameter("camera_cx", -1.0)
         self.declare_parameter("camera_cy", -1.0)
+        self.declare_parameter("pair_lookback", 1)
 
         # Optional TF debug (off by default for rosbag-focused runs).
         self.declare_parameter("base_frame", "uav1/base_link")
@@ -100,10 +100,25 @@ class IncrementalVoNode(Node):
         self.declare_parameter("tf_use_latest_time", False)
         self.declare_parameter("log_image_hz", 0.0)
 
+        # Descriptor-based landmark fusion (replace-if-better descriptors + EMA position update).
+        # Sentinel ``-1.0`` means "use DescriptorMapConfig.defaults(method)" / ``None`` for nullable
+        # fields, mirroring the EKF-sigma block convention below.
+        self.declare_parameter("feature_method", "ORB")
+        self.declare_parameter("feature_n_features", 2000)
+        self.declare_parameter("descriptor_merge_beta", -1.0)
+        self.declare_parameter("descriptor_max_match_distance", -1.0)
+        self.declare_parameter("descriptor_ratio_second_best", -1.0)
+
         # Metric pose fusion (odometry vs optional external ``world_T_camera``).
         self.declare_parameter("fusion_method", "position_blend")
         self.declare_parameter("fusion_position_blend_weight", 0.5)
         self.declare_parameter("provided_pose_topic", "")
+        self.declare_parameter("velocity_topic", "")
+        self.declare_parameter("ekf_sigma_process_pos", 0.05)
+        self.declare_parameter("ekf_sigma_process_vel", 0.5)
+        self.declare_parameter("ekf_sigma_odom_position", 0.02)
+        self.declare_parameter("ekf_sigma_velocity", 0.3)
+        self.declare_parameter("ekf_sigma_vo_position", 2.0)
 
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         odom_main_topic = self.get_parameter("odom_main_topic").get_parameter_value().string_value
@@ -113,9 +128,7 @@ class IncrementalVoNode(Node):
         self._d = float(self.get_parameter("keyframe_distance_m").get_parameter_value().double_value)
         out_root = Path(self.get_parameter("output_root").get_parameter_value().string_value).expanduser()
         self._max_buf = max(16, int(self.get_parameter("max_image_buffer").value))
-        self._motion_confidence = float(
-            self.get_parameter("motion_confidence").get_parameter_value().double_value
-        )
+        self._pair_lookback = max(1, int(self.get_parameter("pair_lookback").value))
         self._fx = float(self.get_parameter("camera_fx").get_parameter_value().double_value)
         self._fy = float(self.get_parameter("camera_fy").get_parameter_value().double_value)
         self._cx_auto = float(self.get_parameter("camera_cx").get_parameter_value().double_value)
@@ -140,6 +153,44 @@ class IncrementalVoNode(Node):
         self._provided_pose_topic = (
             self.get_parameter("provided_pose_topic").get_parameter_value().string_value.strip()
         )
+        self._velocity_topic = (
+            self.get_parameter("velocity_topic").get_parameter_value().string_value.strip()
+        )
+        self._ekf_sigma_process_pos = float(
+            self.get_parameter("ekf_sigma_process_pos").get_parameter_value().double_value
+        )
+        self._ekf_sigma_process_vel = float(
+            self.get_parameter("ekf_sigma_process_vel").get_parameter_value().double_value
+        )
+        self._ekf_sigma_odom_position = float(
+            self.get_parameter("ekf_sigma_odom_position").get_parameter_value().double_value
+        )
+        self._ekf_sigma_velocity = float(
+            self.get_parameter("ekf_sigma_velocity").get_parameter_value().double_value
+        )
+        self._ekf_sigma_vo_position = float(
+            self.get_parameter("ekf_sigma_vo_position").get_parameter_value().double_value
+        )
+
+        self._feature_method = (
+            self.get_parameter("feature_method").get_parameter_value().string_value.strip().upper()
+        )
+        if self._feature_method not in ("ORB", "SIFT"):
+            self.get_logger().warning(
+                f"feature_method={self._feature_method!r} not in {{ORB,SIFT}}; falling back to ORB."
+            )
+            self._feature_method = "ORB"
+        self._feature_n = max(1, int(self.get_parameter("feature_n_features").value))
+        self._descriptor_merge_beta = float(
+            self.get_parameter("descriptor_merge_beta").get_parameter_value().double_value
+        )
+        self._descriptor_max_match_distance = float(
+            self.get_parameter("descriptor_max_match_distance").get_parameter_value().double_value
+        )
+        self._descriptor_ratio_second_best = float(
+            self.get_parameter("descriptor_ratio_second_best").get_parameter_value().double_value
+        )
+
         self._pose_fusion = None
         if repo is not None:
             try:
@@ -148,11 +199,24 @@ class IncrementalVoNode(Node):
                 self._pose_fusion = create_metric_pose_fusion(
                     self._fusion_method_str,
                     position_blend_weight=self._fusion_position_blend_w,
+                    ekf_sigma_process_pos=self._ekf_sigma_process_pos,
+                    ekf_sigma_process_vel=self._ekf_sigma_process_vel,
+                    ekf_sigma_odom_position=self._ekf_sigma_odom_position,
+                    ekf_sigma_velocity=self._ekf_sigma_velocity,
+                    ekf_sigma_vo_position=self._ekf_sigma_vo_position,
                 )
             except ValueError as e:
                 self.get_logger().warning(f"{e}; falling back to fusion_method=odom_only.")
                 self._fusion_method_str = "odom_only"
-                self._pose_fusion = create_metric_pose_fusion("odom_only")
+                self._pose_fusion = create_metric_pose_fusion(
+                    "odom_only",
+                    position_blend_weight=self._fusion_position_blend_w,
+                    ekf_sigma_process_pos=self._ekf_sigma_process_pos,
+                    ekf_sigma_process_vel=self._ekf_sigma_process_vel,
+                    ekf_sigma_odom_position=self._ekf_sigma_odom_position,
+                    ekf_sigma_velocity=self._ekf_sigma_velocity,
+                    ekf_sigma_vo_position=self._ekf_sigma_vo_position,
+                )
 
         stamp_tag = time.strftime("%Y%m%d_%H%M%S")
         self._run_dir = (out_root.resolve() / "ros2_runs" / f"run_{stamp_tag}").resolve()
@@ -168,6 +232,9 @@ class IncrementalVoNode(Node):
         self._kf_records: list[dict] = []
         self._last_kf_pos: np.ndarray | None = None
         self._inc_map = None
+        self._desc_map = None
+        self._world_T_camera_0: np.ndarray | None = None
+        self._effective_desc_cfg = None
         self._persisted = False
         self._tf_buffer: Buffer | None = None
         self._tf_listener: TransformListener | None = None
@@ -179,6 +246,13 @@ class IncrementalVoNode(Node):
                 PoseStamped,
                 self._provided_pose_topic,
                 self._on_provided_pose,
+                _odom_qos(),
+            )
+        if self._velocity_topic:
+            self.create_subscription(
+                TwistStamped,
+                self._velocity_topic,
+                self._on_body_velocity,
                 _odom_qos(),
             )
         self._last_odom_gt: Odometry | None = None
@@ -194,6 +268,7 @@ class IncrementalVoNode(Node):
 
         self.get_logger().info(
             f"Run directory: {self._run_dir} | keyframe_distance_m={self._d} | "
+            f"pair_lookback={self._pair_lookback} | "
             f"image={image_topic!r} odom={odom_main_topic!r}"
             + (f" | odom_gt={odom_gt_topic!r}" if subscribe_gt else "")
             + (
@@ -203,6 +278,7 @@ class IncrementalVoNode(Node):
                     if self._provided_pose_topic
                     else ""
                 )
+                + (f" velocity={self._velocity_topic!r}" if self._velocity_topic else "")
             )
             + (
                 f" | TF debug {self._base_frame!r}<-{self._camera_frame!r} every {tf_period}s"
@@ -227,16 +303,38 @@ class IncrementalVoNode(Node):
         if self._K is None or self._repo_root is None or self._inc_map is not None:
             return
         try:
-            from pipeline.config import FeatureConfig, clamp_motion_confidence
+            from dataclasses import replace as dc_replace
+
+            from pipeline.config import FeatureConfig
+            from pipeline.descriptor_landmark_map import (
+                DescriptorLandmarkMap,
+                DescriptorMapConfig,
+            )
             from pipeline.map import IncrementalMap, MapConfig
         except ImportError as e:
             self.get_logger().error(f"Could not import pipeline: {e}")
             return
 
-        cfg = MapConfig(motion_confidence=clamp_motion_confidence(self._motion_confidence))
-        feat = FeatureConfig()
+        cfg = MapConfig()
+        feat = FeatureConfig(method=self._feature_method, n_features=self._feature_n)
         self._inc_map = IncrementalMap(
             cfg=cfg, feat_cfg=feat, K=self._K, world_T_camera=self._world_T_camera
+        )
+
+        desc_cfg = DescriptorMapConfig.defaults(self._feature_method)
+        if self._descriptor_max_match_distance >= 0.0:
+            desc_cfg = dc_replace(desc_cfg, max_match_distance=self._descriptor_max_match_distance)
+        if self._descriptor_merge_beta >= 0.0:
+            desc_cfg = dc_replace(desc_cfg, merge_beta=self._descriptor_merge_beta)
+        if self._descriptor_ratio_second_best >= 0.0:
+            desc_cfg = dc_replace(desc_cfg, ratio_second_best=self._descriptor_ratio_second_best)
+        self._desc_map = DescriptorLandmarkMap(desc_cfg)
+        self._effective_desc_cfg = desc_cfg
+        self.get_logger().info(
+            f"Descriptor map: method={self._feature_method} "
+            f"merge_beta={desc_cfg.merge_beta} "
+            f"max_match_distance={desc_cfg.max_match_distance} "
+            f"ratio_second_best={desc_cfg.ratio_second_best}"
         )
 
     def _fused_cam_to_world_and_pos(self) -> tuple[np.ndarray, np.ndarray]:
@@ -309,6 +407,21 @@ class IncrementalVoNode(Node):
             T, (msg.header.stamp.sec, msg.header.stamp.nanosec)
         )
 
+    def _on_body_velocity(self, msg: TwistStamped) -> None:
+        if self._pose_fusion is None:
+            return
+        v_b = np.array(
+            [
+                float(msg.twist.linear.x),
+                float(msg.twist.linear.y),
+                float(msg.twist.linear.z),
+            ],
+            dtype=np.float64,
+        )
+        self._pose_fusion.push_body_velocity(
+            v_b, (msg.header.stamp.sec, msg.header.stamp.nanosec)
+        )
+
     def _on_odom_gt(self, msg: Odometry) -> None:
         self._last_odom_gt = msg
 
@@ -346,6 +459,8 @@ class IncrementalVoNode(Node):
 
         self._world_T_camera.append(bf.cam_to_world.copy())
         self._gray_kf.append(bf.gray)
+        if idx == 0:
+            self._world_T_camera_0 = bf.cam_to_world.copy()
 
         rec = {
             "index": idx,
@@ -371,17 +486,45 @@ class IncrementalVoNode(Node):
         self.get_logger().info(msg)
 
         if idx >= 1 and self._inc_map is not None:
-            try:
-                tw = self._inc_map.add_frame_pair(
-                    idx - 1, idx, self._gray_kf[idx - 1], self._gray_kf[idx]
-                )
-                n_lm = len(self._inc_map.landmarks)
-                self.get_logger().info(
-                    f"Two-view {idx - 1}->{idx}: triangulated cols={tw.X_world_h.shape[1]} "
-                    f"landmarks_total={n_lm} reproj={tw.reproj!r}"
-                )
-            except Exception as e:
-                self.get_logger().error(f"add_frame_pair failed for ({idx - 1}->{idx}): {e}")
+            tw_consecutive = None
+            for off in range(1, min(self._pair_lookback, idx) + 1):
+                i = idx - off
+                try:
+                    tw = self._inc_map.add_frame_pair(
+                        i, idx, self._gray_kf[i], self._gray_kf[idx]
+                    )
+                    if (
+                        tw.scale_ok
+                        and self._desc_map is not None
+                        and self._world_T_camera_0 is not None
+                    ):
+                        try:
+                            self._desc_map.integrate(tw, self._world_T_camera_0)
+                        except Exception as ex:
+                            self.get_logger().warn(
+                                f"DescriptorLandmarkMap.integrate failed for ({i}->{idx}): {ex}"
+                            )
+                    n_desc = len(self._desc_map.landmarks) if self._desc_map is not None else 0
+                    self.get_logger().info(
+                        f"Two-view {i}->{idx}: triangulated cols={tw.X_world_h.shape[1]} "
+                        f"descriptor_landmarks_total={n_desc} reproj={tw.reproj!r}"
+                    )
+                    if off == 1:
+                        tw_consecutive = tw
+                except Exception as e:
+                    self.get_logger().error(f"add_frame_pair failed for ({i}->{idx}): {e}")
+            if tw_consecutive is not None and self._pose_fusion is not None and hasattr(
+                self._pose_fusion, "ingest_vo_keyframe_increment"
+            ):
+                Wi = self._world_T_camera[idx - 1]
+                Wj = self._world_T_camera[idx]
+                stamp = (bf.stamp_sec, bf.stamp_nsec)
+                try:
+                    self._pose_fusion.ingest_vo_keyframe_increment(
+                        Wi, Wj, tw_consecutive.R_est, tw_consecutive.t_est, stamp
+                    )
+                except Exception as ex:
+                    self.get_logger().warn(f"ingest_vo_keyframe_increment: {ex}")
 
     def _on_tf_timer(self) -> None:
         if self._tf_buffer is None or self._last_image_msg is None:
@@ -423,18 +566,46 @@ class IncrementalVoNode(Node):
             self._run_dir / "position.json",
             frame_id=frame_id,
             keyframe_distance_m=self._d,
+            pair_lookback=self._pair_lookback,
             odom_child_frame=child,
             odom_header_frame=header_frame,
             records=self._kf_records,
             fusion_method=self._fusion_method_str,
             provided_pose_topic=self._provided_pose_topic or None,
+            velocity_topic=self._velocity_topic or None,
+            feature_method=self._feature_method,
+            feature_n_features=self._feature_n,
+            descriptor_merge_beta=(
+                self._effective_desc_cfg.merge_beta if self._effective_desc_cfg is not None else None
+            ),
+            descriptor_max_match_distance=(
+                self._effective_desc_cfg.max_match_distance
+                if self._effective_desc_cfg is not None
+                else None
+            ),
+            descriptor_ratio_second_best=(
+                self._effective_desc_cfg.ratio_second_best
+                if self._effective_desc_cfg is not None
+                else None
+            ),
+            landmarks_reference_frame="camera_0" if self._desc_map is not None else None,
         )
         pts = np.zeros((0, 3), dtype=np.float64)
-        if self._inc_map is not None and self._inc_map.landmarks:
-            pts = np.stack([v for v in self._inc_map.landmarks.values()], axis=0)
+        if self._desc_map is not None:
+            pts = self._desc_map.positions_cam0()
         save_sparse_map_npz(self._run_dir / "sparse_map.npz", pts)
+        if self._desc_map is not None:
+            try:
+                from pipeline.descriptor_landmark_map import export_landmarks_csv
+
+                export_landmarks_csv(
+                    self._run_dir / "descriptor_landmarks.csv", self._desc_map
+                )
+            except Exception as e:
+                self.get_logger().warn(f"export_landmarks_csv failed: {e}")
         self.get_logger().info(
-            f"Saved run: {self._run_dir} ({len(self._kf_records)} keyframes, {pts.shape[0]} landmark points)"
+            f"Saved run: {self._run_dir} ({len(self._kf_records)} keyframes, "
+            f"{pts.shape[0]} descriptor landmarks in cam0 frame)"
         )
 
     def destroy_node(self) -> None:

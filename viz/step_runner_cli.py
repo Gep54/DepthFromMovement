@@ -35,19 +35,12 @@ def main() -> None:
     )
     p.add_argument("--i", type=int, default=0, help="First frame index (single-pair mode only)")
     p.add_argument("--j", type=int, default=1, help="Second frame index (single-pair mode only)")
-    p.add_argument(
-        "--motion-confidence",
-        type=float,
-        default=1.0,
-        help="Trust in motion.json relative pose: 1=full odometry, 0=vision-only relative motion (default 1)",
-    )
     args = p.parse_args()
     ds = load_dataset(args.dataset_root)
     if args.sequence:
         export_sequence_consecutive_pairs(
             ds,
             args.run_dir,
-            motion_confidence=args.motion_confidence,
             fuse_merge_px=args.fuse_merge_px,
             pair_lookback=args.pair_lookback,
         )
@@ -58,7 +51,6 @@ def main() -> None:
             args.run_dir,
             i=args.i,
             j=args.j,
-            motion_confidence=args.motion_confidence,
         )
         ensure_all_step_pngs_exist(args.run_dir)
 

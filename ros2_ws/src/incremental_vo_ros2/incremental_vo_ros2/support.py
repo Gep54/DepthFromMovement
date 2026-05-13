@@ -151,8 +151,16 @@ def save_keyframe_manifest(
     odom_child_frame: str,
     odom_header_frame: str,
     records: list[dict],
+    pair_lookback: int | None = None,
     fusion_method: str | None = None,
     provided_pose_topic: str | None = None,
+    velocity_topic: str | None = None,
+    feature_method: str | None = None,
+    feature_n_features: int | None = None,
+    descriptor_merge_beta: float | None = None,
+    descriptor_max_match_distance: float | None = None,
+    descriptor_ratio_second_best: float | None = None,
+    landmarks_reference_frame: str | None = None,
 ) -> None:
     payload = {
         "odom_header_frame_id": odom_header_frame,
@@ -161,10 +169,32 @@ def save_keyframe_manifest(
         "keyframe_distance_m": keyframe_distance_m,
         "keyframes": records,
     }
+    if pair_lookback is not None:
+        payload["pair_lookback"] = int(pair_lookback)
     if fusion_method is not None:
         payload["fusion_method"] = fusion_method
     if provided_pose_topic is not None:
         payload["provided_pose_topic"] = provided_pose_topic
+    if velocity_topic is not None:
+        payload["velocity_topic"] = velocity_topic
+    if feature_method is not None:
+        payload["feature_method"] = feature_method
+    if feature_n_features is not None:
+        payload["feature_n_features"] = int(feature_n_features)
+    # ``merge_beta``/``ratio_second_best`` are legitimately ``None`` (mean-equivalent / disabled);
+    # only the top-level keys are gated on caller intent, not on the value itself.
+    if descriptor_merge_beta is not None or feature_method is not None:
+        payload["descriptor_merge_beta"] = (
+            None if descriptor_merge_beta is None else float(descriptor_merge_beta)
+        )
+    if descriptor_max_match_distance is not None:
+        payload["descriptor_max_match_distance"] = float(descriptor_max_match_distance)
+    if descriptor_ratio_second_best is not None or feature_method is not None:
+        payload["descriptor_ratio_second_best"] = (
+            None if descriptor_ratio_second_best is None else float(descriptor_ratio_second_best)
+        )
+    if landmarks_reference_frame is not None:
+        payload["landmarks_reference_frame"] = landmarks_reference_frame
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 

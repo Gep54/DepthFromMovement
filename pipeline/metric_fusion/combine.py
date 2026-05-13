@@ -63,6 +63,10 @@ def fuse_pose_sequence(
 ) -> list[np.ndarray]:
     """Align by index: ``provided_poses[i]`` pairs with ``odom_poses[i]`` when present."""
     n = len(odom_poses)
+    if str(method).strip().lower().replace("-", "_") == "ekf_pose_velocity":
+        raise ValueError(
+            "fusion method 'ekf_pose_velocity' is only for ROS streaming, not offline fuse_pose_sequence"
+        )
     if provided_poses is not None and len(provided_poses) != n:
         raise ValueError(
             f"provided_poses length {len(provided_poses)} != odom_poses length {n}"

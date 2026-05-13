@@ -5,31 +5,26 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from pipeline.config import FeatureConfig, clamp_motion_confidence
+from pipeline.config import FeatureConfig
 from pipeline.geometry import (
-    essential_from_world_poses,
-    blend_relative_pose,
     essential_from_R_t,
+    essential_from_world_poses,
     recover_pose_from_essential,
     relative_motion_from_world_poses,
-    align_translation_direction,
+    vision_rotation_odom_translation_scale,
 )
 from pipeline.matching import match_pair_points
-from pipeline.triangulation import triangulate_world_points, triangulate_cam1_frame, cam1_to_world_points
+from pipeline.triangulation import triangulate_cam1_frame, cam1_to_world_points
 from pipeline.features import FrameFeatures, detect_and_compute
 from pipeline.metrics import reprojection_errors, summarize_reprojection
 
 
 @dataclass
 class MapConfig:
-    """``motion_confidence`` in [0, 1]: 1 = odometry relative pose; 0 = vision-only relative pose."""
+    """Two-view geometry: RANSAC essential + vision rotation/direction, odometry translation norm only."""
 
-    motion_confidence: float = 1.0
     ransac_epipolar_thresh: float = 1.0
     min_parallax_deg: float = 0.5
-
-    def __post_init__(self) -> None:
-        self.motion_confidence = clamp_motion_confidence(self.motion_confidence)
 
 
 @dataclass
@@ -112,10 +107,7 @@ class IncrementalMap:
 
         Wi = self.world_T_camera[i]
         Wj = self.world_T_camera[j]
-        R_gt, t_gt = relative_motion_from_world_poses(Wi, Wj)
-        scale = 1.0
-        scale_ok = True
-        alpha = float(self.cfg.motion_confidence)
+        _, t_gt = relative_motion_from_world_poses(Wi, Wj)
 
         E_fm, mask = cv2.findEssentialMat(
             pts1,
@@ -125,9 +117,6 @@ class IncrementalMap:
             prob=0.999,
             threshold=self.cfg.ransac_epipolar_thresh,
         )
-        E: np.ndarray | None
-        R_est: np.ndarray | None
-        t_est: np.ndarray | None
 
         inlier = mask.ravel().astype(bool)
         pts1_i = pts1[inlier]
@@ -160,22 +149,16 @@ class IncrementalMap:
         if pts1_i.shape[0] == 0:
             return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
 
-        if alpha >= 1.0:
-            E = essential_from_world_poses(Wi, Wj, self.K)
-            X_h, cheiral = triangulate_world_points(pts1_i, pts2_i, Wi, Wj, self.K)
-            R_est, t_est = R_gt.copy(), t_gt.copy()
-        else:
-            if pts1_i.shape[0] < 8:
-                return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
-            E_fm33 = np.asarray(E_fm, dtype=np.float64).reshape(3, 3)
-            R_vis, t_vis, _ = recover_pose_from_essential(E_fm33, pts1_i, pts2_i, self.K, mask=None)
-            if alpha > 0.0:
-                t_vis = align_translation_direction(t_vis, t_gt)
-            R_b, t_b = blend_relative_pose(R_vis, t_vis, R_gt, t_gt, alpha)
-            R_est, t_est = R_b, t_b
-            E = essential_from_R_t(R_b, t_b)
-            X_cam_h, cheiral = triangulate_cam1_frame(pts1_i, pts2_i, self.K, R_b, t_b)
-            X_h = cam1_to_world_points(X_cam_h, Wi)
+        E_fm33 = np.asarray(E_fm, dtype=np.float64).reshape(3, 3)
+        R_vis, t_vis, _ = recover_pose_from_essential(E_fm33, pts1_i, pts2_i, self.K, mask=None)
+        R_est, t_est, scale_ok, scale = vision_rotation_odom_translation_scale(R_vis, t_vis, t_gt)
+
+        if not scale_ok:
+            return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
+
+        E = essential_from_R_t(R_est, t_est)
+        X_cam_h, cheiral = triangulate_cam1_frame(pts1_i, pts2_i, self.K, R_est, t_est)
+        X_h = cam1_to_world_points(X_cam_h, Wi)
         X_h[:, ~cheiral] = np.nan
         err1 = reprojection_errors(X_h, pts1_i, self.K, Wi)
         err2 = reprojection_errors(X_h, pts2_i, self.K, Wj)

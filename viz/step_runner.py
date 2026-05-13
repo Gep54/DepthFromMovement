@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from data.dataset import Dataset, load_gt_depth_for_frame, read_image_bgr
-from pipeline.config import FeatureConfig, clamp_motion_confidence
+from pipeline.config import FeatureConfig
 from pipeline.features import FrameFeatures, compute_frame_features_cache, detect_and_compute
 from pipeline.geometry import essential_from_world_poses, invert_se3
 from pipeline.map import IncrementalMap, MapConfig, TwoViewResult
@@ -63,7 +63,6 @@ def export_single_pair_stages(
     *,
     i: int,
     j: int,
-    motion_confidence: float = 1.0,
     feat_cfg: FeatureConfig | None = None,
     reuse_two_view: TwoViewResult | None = None,
     frame_features_cache: Sequence[FrameFeatures] | None = None,
@@ -80,7 +79,6 @@ def export_single_pair_stages(
     detection again per pair.
     """
     feat_cfg = feat_cfg if feat_cfg is not None else ds.feature_config
-    motion_confidence = clamp_motion_confidence(motion_confidence)
     rec = PipelineRecorder(pair_run_dir)
 
     bgr_i = read_image_bgr(ds.image_paths[i])
@@ -101,7 +99,7 @@ def export_single_pair_stages(
         assert reuse_two_view.frame_i == i and reuse_two_view.frame_j == j
         tw = reuse_two_view
     else:
-        map_cfg = MapConfig(motion_confidence=motion_confidence)
+        map_cfg = MapConfig()
         m = IncrementalMap(cfg=map_cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
         tw = m.add_frame_pair(i, j, g_i, g_j, features_i=fi, features_j=fj)
     pts1, pts2 = tw.pts1, tw.pts2
@@ -184,7 +182,6 @@ def export_all_stages(
     *,
     i: int = 0,
     j: int = 1,
-    motion_confidence: float = 1.0,
     feat_cfg: FeatureConfig | None = None,
     frame_features_cache: Sequence[FrameFeatures] | None = None,
 ) -> None:
@@ -194,7 +191,6 @@ def export_all_stages(
         run_dir,
         i=i,
         j=j,
-        motion_confidence=motion_confidence,
         feat_cfg=feat_cfg,
         frame_features_cache=frame_features_cache,
     )
@@ -204,7 +200,6 @@ def export_sequence_consecutive_pairs(
     ds: Dataset,
     run_dir: str | Path,
     *,
-    motion_confidence: float = 1.0,
     feat_cfg: FeatureConfig | None = None,
     fuse_merge_px: float = 4.0,
     pair_lookback: int = 10,
@@ -238,7 +233,6 @@ def export_sequence_consecutive_pairs(
         raise ValueError(f"need at least 2 images for sequence export, got {n}")
 
     fc = feat_cfg if feat_cfg is not None else ds.feature_config
-    mc = clamp_motion_confidence(motion_confidence)
     wl = max(1, int(pair_lookback))
     grays: list[np.ndarray] = []
     for path in ds.image_paths:
@@ -248,7 +242,7 @@ def export_sequence_consecutive_pairs(
 
     frame_cache = compute_frame_features_cache(grays, fc)
 
-    map_cfg = MapConfig(motion_confidence=mc)
+    map_cfg = MapConfig()
     inc = IncrementalMap(
         cfg=map_cfg,
         feat_cfg=fc,
@@ -275,7 +269,6 @@ def export_sequence_consecutive_pairs(
             pair_dir,
             i=i,
             j=j,
-            motion_confidence=mc,
             feat_cfg=fc,
             reuse_two_view=tw,
             frame_features_cache=frame_cache,

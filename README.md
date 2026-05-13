@@ -6,11 +6,11 @@
 
 ## What this codebase does
 
-1. **Metric pose fusion (optional)** — `pipeline.metric_fusion` combines a **primary** track (odometry / `motion.json`) with an optional **provided** track (`geometry_msgs/PoseStamped` in ROS, or `provided_motion.json` offline). Built-in strategies: `odom_only`, `provided_if_available`, `position_blend` (blend translations; rotation from odometry). Same module drives live ROS and file-based `Dataset` loading when the optional files exist.
+1. **Metric pose fusion (optional)** — `pipeline.metric_fusion` combines a **primary** track (odometry / `motion.json`) with an optional **provided** track (`geometry_msgs/PoseStamped` in ROS, or `provided_motion.json` offline). Built-in strategies: `odom_only`, `provided_if_available`, `position_blend` (blend translations; rotation from odometry), and **`ekf_pose_velocity`** (ROS only: constant-velocity EKF on world position + velocity; odometry position, `TwistStamped` body linear velocity, and a **keyframe-rate** VO direction measurement from two-view `t_est`). Offline JSON fusion supports only the first three methods (not `ekf_pose_velocity`).
 
 2. **Load a dataset** — Sorted RGB frames plus **`calibration.json`** (intrinsics) and **`motion.json`** (poses). Optional **`provided_motion.json`** (same schema as **`motion.json`**) and **`fusion.json`** (`method`, `position_blend_weight`). Optional GT depth / poses under documented paths (`data/`).
 
-3. **Two-view pipeline** (ORB/SIFT features → matching → RANSAC on the essential constraint → triangulation). A scalar **`motion_confidence`** \(\alpha\in[0,1]\) blends **relative** rotation and translation from **visual geometry** (\(\alpha\to 0\)) with **metric-relative** \(R,\mathbf{t}\) from the **fused** trajectory (\(\alpha\to 1\)). Intrinsics-distorted images may still be **undistorted internally** before detection; **`world_T_camera`** expresses triangulated points in the dataset world frame.
+3. **Two-view pipeline** (ORB/SIFT features → matching → RANSAC on the essential constraint → `recoverPose` → **vision** relative rotation and translation **direction** → scale translation to **odometry** \(\|\mathbf{t}\|\) from the fused trajectory between the two frames → triangulation in world frame anchored at the first camera). Intrinsics-distorted images may still be **undistorted internally** before detection; **`world_T_camera`** expresses triangulated points in the dataset world frame.
 
 4. **Exports** — Step PNGs: raw mosaic, keypoints, matches, epilines, inlier/outlier matches, triangulation mosaic, sparse estimated depth on the reference frame, optional GT depth error. Depth colouring: **yellow = near → green → blue → pink = far** (no saturated red, to stay distinct from error highlights).
 
@@ -27,7 +27,7 @@ Point the CLI at a folder that contains:
 | **`calibration.json`** | `K` (3×3), optional `dist_coeffs`, optional `image_size` |
 | **`motion.json`** | Per-frame **camera→world** pose (`world_T_camera`): \(\mathbf{X}_w = \mathbf{R}\mathbf{X}_c + \mathbf{t}\). Fields: `pose_convention`, `representation` (`absolute` or `relative_to_prev`), `frames[]` with `T` (4×4 or 3×4) |
 | **`provided_motion.json`** (optional) | Second pose track, **same schema** as **`motion.json`**, one transform per image. Fused with the primary track per **`fusion.json`** when both files exist. |
-| **`fusion.json`** (optional) | Offline fusion: **`method`** (`odom_only`, `provided_if_available`, `position_blend`; default **`position_blend`** when this file is missing but **`provided_motion.json`** exists) and optional **`position_blend_weight`** in \([0,1]\) (weight on provided translation for **`position_blend`**). Ignored if **`provided_motion.json`** is absent. |
+| **`fusion.json`** (optional) | Offline fusion: **`method`** (`odom_only`, `provided_if_available`, `position_blend` only — **not** `ekf_pose_velocity`; default **`position_blend`** when this file is missing but **`provided_motion.json`** exists) and optional **`position_blend_weight`** in \([0,1]\). Ignored if **`provided_motion.json`** is absent. |
 | **`images/`** | Frames (`*.png` by default); if empty, the loader also searches image files in the dataset root |
 
 Optional: **`features.json`** — detector/matcher settings (ORB vs SIFT, counts, Lowe ratio, cross-check, ORB pyramid / SIFT contrast); omitted keys use library defaults (same as **`FeatureConfig`**). **`descriptor_map.json`** (optional) — knobs for **`dfm-descriptor-map`**: **`merge_beta`** (`null` = incremental arithmetic mean via \(1/(n+1)\)), **`max_match_distance`**, **`ratio_second_best`**. **`gt_depth/`** (depth maps named like image stems), **`gt_poses.txt`** (TUM-style; length must match image count).
@@ -53,7 +53,7 @@ pytest tests
 
 ### ROS 2 package (live mapping)
 
-The **`ros2_ws/`** colcon workspace contains **`incremental_vo_ros2`**: a node that subscribes to a monocular image and fused odometry, optionally to a **`geometry_msgs/PoseStamped`** second pose (**`provided_pose_topic`**), fuses them via **`pipeline.metric_fusion`** (parameters **`fusion_method`**, **`fusion_position_blend_weight`**), selects **keyframes** when the **fused** translation has moved at least **`keyframe_distance_m`** (default **0.5** m), runs **`pipeline.IncrementalMap`** between consecutive keyframes, and on shutdown writes **`output_root/ros2_runs/run_<timestamp>/`**: **`images/`**, **`position.json`** (includes **`fusion_method`** and topic when set), and **`sparse_map.npz`**. The process must import **`pipeline.*`** from this repository (the node walks parents until **`pipeline/map.py`**).
+The **`ros2_ws/`** colcon workspace contains **`incremental_vo_ros2`**: a node that subscribes to a monocular image and fused odometry, optionally to a **`geometry_msgs/PoseStamped`** second pose (**`provided_pose_topic`**) for snapshot fusion methods, and optionally **`geometry_msgs/TwistStamped`** on **`velocity_topic`** when using **`fusion_method:=ekf_pose_velocity`**. Fusion is implemented in **`pipeline.metric_fusion`**; **`ekf_pose_velocity`** runs a **6D constant-velocity EKF** (world position + velocity) with odometry position updates, body-frame velocity rotated by odometry attitude, and after each successful keyframe pair a **soft position** update from two-view translation direction (same rate as keyframes, not per image). Other **`fusion_method`** values snapshot-fuse poses. The node selects **keyframes** when the **fused** translation has moved at least **`keyframe_distance_m`** (default **0.5** m), runs **`pipeline.IncrementalMap`** between consecutive keyframes, and on shutdown writes **`output_root/ros2_runs/run_<timestamp>/`**: **`images/`**, **`position.json`** (includes **`fusion_method`**, optional topics), and **`sparse_map.npz`**. The process must import **`pipeline.*`** from this repository (the node walks parents until **`pipeline/map.py`**).
 
 **Build (from `ros2_ws/`, with your ROS 2 distro already on `PATH`):**
 
@@ -77,7 +77,7 @@ When sourcing the overlay, you may see **RTI Connext DDS** warnings about `rtise
 ros2 run incremental_vo_ros2 incremental_vo_node
 ```
 
-Useful **`--ros-args`** parameters include **`-p use_sim_time:=true`** when playing a rosbag with **`ros2 bag play … --clock`**, **`-p output_root:=…`**, **`-p keyframe_distance_m:=0.5`**, topic overrides (**`-p image_topic:=…`**, **`-p odom_main_topic:=…`**), and fusion (**`-p fusion_method:=odom_only`** to ignore a second pose, **`-p fusion_position_blend_weight:=0.3`**, **`-p provided_pose_topic:=/my/pose`**). Default **`fusion_method`** is **`position_blend`** (equivalent to odometry-only translation when no **`provided_pose_topic`** / messages). Optional simulator odom: **`-p subscribe_odom_gt:=true`**.
+Useful **`--ros-args`** parameters include **`-p use_sim_time:=true`** when playing a rosbag with **`ros2 bag play … --clock`**, **`-p output_root:=…`**, **`-p keyframe_distance_m:=0.5`**, topic overrides (**`-p image_topic:=…`**, **`-p odom_main_topic:=…`**), snapshot fusion (**`-p fusion_method:=odom_only`**, **`-p fusion_position_blend_weight:=0.3`**, **`-p provided_pose_topic:=/my/pose`**), and EKF fusion (**`-p fusion_method:=ekf_pose_velocity`**, **`-p velocity_topic:=/my/body/twist`**, **`-p ekf_sigma_odom_position:=0.02`**, …). Default **`fusion_method`** is **`position_blend`**. Optional simulator odom: **`-p subscribe_odom_gt:=true`**.
 
 The thesis **`pipeline/`** module (imported when building the map) depends on **SciPy**. If you see **`ModuleNotFoundError: scipy`**, install into the **same Python environment** that runs `ros2` (e.g. `pixi add scipy` in your ROS env, or `python -m pip install -r src/incremental_vo_ros2/requirements.txt` using that interpreter), then rebuild or restart the node.
 
@@ -105,7 +105,7 @@ dfm-descriptor-map path/to/dataset --run-dir runs/dmap --export-csv runs/dmap/la
 | Option | Meaning |
 |--------|---------|
 | **`--run-dir`** | Output root (writes **`descriptor_map/`** with PNGs inside) |
-| **`--motion-confidence`**, **`--pair-lookback`** | Same semantics as sequence export |
+| **`--pair-lookback`** | Same as sequence export (descriptor map uses multi-baseline pairing) |
 | **`--merge-beta`** | Fixed EMA \(\beta\); omit for mean-equivalent behaviour |
 | **`--descriptor-max-dist`** | Override NN association threshold (Hamming ORB / L2 SIFT) |
 | **`--descriptor-map-config`** | Path to JSON (default tries **`<dataset>/descriptor_map.json`**) |
@@ -117,7 +117,7 @@ dfm-descriptor-map path/to/dataset --run-dir runs/dmap --export-csv runs/dmap/la
 Processes frames **`i`** and **`j`** only; writes PNGs under **`--run-dir/steps/`**.
 
 ```bash
-dfm-export-steps path/to/dataset --run-dir runs/demo --i 0 --j 1 --motion-confidence 1
+dfm-export-steps path/to/dataset --run-dir runs/demo --i 0 --j 1
 ```
 
 #### Full sequence + fused landmarks
@@ -142,7 +142,6 @@ dfm-export-steps path/to/dataset --run-dir runs/demo --sequence --pair-lookback 
 | **`--fuse-merge-px`** | Pixel radius for merging landmarks on shared frames when `--sequence` (default `4`) |
 | **`--pair-lookback`** | With `--sequence`: pair each frame `j` with `j-1…j-W` (default **`10`**). Use **`1`** for consecutive-only. |
 | **`--i`**, **`--j`** | Frame indices for **single-pair** mode only (defaults `0`, `1`) |
-| **`--motion-confidence`** | \(0\) = vision-only relative motion (no odometry alignment of translation); \(1\) = triangulation from odometry relative pose; values in between **SLERP** rotation and **linearly mix** translation with odometry (default **`1`**) |
 
 Outputs:
 
@@ -158,12 +157,11 @@ from viz.step_runner import export_all_stages, export_sequence_consecutive_pairs
 
 ds = load_dataset(Path("path/to/dataset"))
 
-export_all_stages(ds, "runs/single", i=0, j=1, motion_confidence=1.0)
+export_all_stages(ds, "runs/single", i=0, j=1)
 
 export_sequence_consecutive_pairs(
     ds,
     "runs/sequence",
-    motion_confidence=1.0,
     fuse_merge_px=4.0,
     pair_lookback=10,
 )

@@ -40,6 +40,10 @@ class MetricPoseFusion(ABC):
         """Translation of ``fused_world_T_camera()``."""
         return self.fused_world_T_camera()[:3, 3].copy()
 
+    def push_body_velocity(self, v_b: np.ndarray, stamp: tuple[int, int] | None = None) -> None:
+        """Optional body-frame linear velocity (3,). Default no-op for snapshot fusion."""
+        del v_b, stamp
+
 
 class OdomOnlyFusion(MetricPoseFusion):
     """Ignore provided track; identical to pre-fusion ROS behaviour."""
@@ -102,11 +106,16 @@ def create_metric_pose_fusion(
     name: str,
     *,
     position_blend_weight: float = 0.5,
+    ekf_sigma_process_pos: float = 0.05,
+    ekf_sigma_process_vel: float = 0.5,
+    ekf_sigma_odom_position: float = 0.02,
+    ekf_sigma_velocity: float = 0.3,
+    ekf_sigma_vo_position: float = 2.0,
 ) -> MetricPoseFusion:
     """
     Instantiate a streaming fusion strategy by registry name.
 
-    Names: ``odom_only``, ``provided_if_available``, ``position_blend``.
+    Names: ``odom_only``, ``provided_if_available``, ``position_blend``, ``ekf_pose_velocity``.
     """
     key = name.strip().lower().replace("-", "_")
     if key == "odom_only":
@@ -115,9 +124,19 @@ def create_metric_pose_fusion(
         return StatefulPairFusion("provided_if_available")
     if key == "position_blend":
         return StatefulPairFusion("position_blend", position_blend_weight=position_blend_weight)
+    if key == "ekf_pose_velocity":
+        from pipeline.metric_fusion.ekf_pose_velocity import EkfPoseVelocityFusion
+
+        return EkfPoseVelocityFusion(
+            sigma_process_pos=ekf_sigma_process_pos,
+            sigma_process_vel=ekf_sigma_process_vel,
+            sigma_odom_position=ekf_sigma_odom_position,
+            sigma_velocity=ekf_sigma_velocity,
+            sigma_vo_position=ekf_sigma_vo_position,
+        )
     known = ", ".join(sorted(list_registered_metric_fusion_methods()))
     raise ValueError(f"unknown fusion_method {name!r}; expected one of: {known}")
 
 
 def list_registered_metric_fusion_methods() -> tuple[str, ...]:
-    return ("odom_only", "provided_if_available", "position_blend")
+    return ("ekf_pose_velocity", "odom_only", "provided_if_available", "position_blend")
