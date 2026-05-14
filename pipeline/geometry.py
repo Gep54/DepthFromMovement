@@ -43,6 +43,22 @@ def invert_se3(T: np.ndarray) -> np.ndarray:
     return _inv_se3(T)
 
 
+def canonicalize_world_T_camera_to_first(world_T_camera: list[np.ndarray]) -> list[np.ndarray]:
+    """Left-multiply every pose by ``inv(W[0])`` so the first pose becomes identity.
+
+    Here **world** denotes the global frame used by the pipeline after this step: the origin
+    and axes align with camera 0 at frame 0 (first pose is :math:`I`). For any indices
+    :math:`i,j`, pairwise relative motion
+    :math:`W_i^{-1} W_j` is unchanged, so odometry translation norms used in two-view scaling
+    are identical before and after canonicalization.
+    """
+    if not world_T_camera:
+        raise ValueError("world_T_camera must be non-empty")
+    W0 = np.asarray(world_T_camera[0], dtype=np.float64)
+    L = _inv_se3(W0)
+    return [L @ np.asarray(Wk, dtype=np.float64) for Wk in world_T_camera]
+
+
 def estimate_essential_ransac(
     pts1: np.ndarray,
     pts2: np.ndarray,

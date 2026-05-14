@@ -20,6 +20,7 @@ from data.schema import (
     validate_dataset_consistency,
     validate_motion_vs_images,
 )
+from pipeline.geometry import canonicalize_world_T_camera_to_first, invert_se3
 
 
 @dataclass
@@ -29,10 +30,11 @@ class Dataset:
     calibration: Calibration
     motion: MotionSpec
     world_T_camera: list[np.ndarray]
+    """Per-frame camera-to-world poses; after ``load_dataset`` the trajectory is camera-0-centric (first pose is identity)."""
     gt_depth_paths: list[Path | None] = field(default_factory=list)
     """Aligned with image_paths; None if missing."""
     gt_world_T_camera: list[np.ndarray] | None = None
-    """Optional ground-truth poses (same count as images when present)."""
+    """Optional ground-truth poses; when present, transformed with the same left-multiplier as ``world_T_camera``."""
     feature_config: FeatureConfig = field(default_factory=FeatureConfig)
     """Feature detector + matcher settings (from optional ``features.json``)."""
 
@@ -152,6 +154,12 @@ def load_dataset(
             raise ValueError(
                 f"gt_poses.txt has {len(gt_poses)} rows but found {len(image_paths)} images; counts must match"
             )
+
+    W_first = np.asarray(world_T_camera[0], dtype=np.float64).copy()
+    world_T_camera = canonicalize_world_T_camera_to_first(world_T_camera)
+    if gt_poses is not None:
+        L = invert_se3(W_first)
+        gt_poses = [L @ np.asarray(G, dtype=np.float64) for G in gt_poses]
 
     return Dataset(
         paths=p,

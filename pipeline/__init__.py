@@ -2,6 +2,7 @@ from pipeline.config import FeatureConfig
 from pipeline.features import FrameFeatures, compute_frame_features_cache, detect_and_compute
 from pipeline.matching import match_pair_points
 from pipeline.geometry import (
+    canonicalize_world_T_camera_to_first,
     essential_from_R_t,
     essential_from_world_poses,
     relative_motion_from_world_poses,
@@ -37,6 +38,7 @@ __all__ = [
     "compute_frame_features_cache",
     "detect_and_compute",
     "match_pair_points",
+    "canonicalize_world_T_camera_to_first",
     "essential_from_world_poses",
     "relative_motion_from_world_poses",
     "estimate_essential_ransac",

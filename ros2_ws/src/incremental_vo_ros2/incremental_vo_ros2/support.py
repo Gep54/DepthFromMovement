@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -161,6 +162,8 @@ def save_keyframe_manifest(
     descriptor_max_match_distance: float | None = None,
     descriptor_ratio_second_best: float | None = None,
     landmarks_reference_frame: str | None = None,
+    map_coordinate_frame: str | None = None,
+    eval_world_T_camera0_flat16: Sequence[float] | None = None,
 ) -> None:
     payload = {
         "odom_header_frame_id": odom_header_frame,
@@ -195,7 +198,52 @@ def save_keyframe_manifest(
         )
     if landmarks_reference_frame is not None:
         payload["landmarks_reference_frame"] = landmarks_reference_frame
+    if map_coordinate_frame is not None:
+        payload["map_coordinate_frame"] = map_coordinate_frame
+    if eval_world_T_camera0_flat16 is not None:
+        payload["eval_world_T_camera0"] = [float(x) for x in eval_world_T_camera0_flat16]
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def eval_world_T_camera0_from_parameter(values: Sequence[float]) -> np.ndarray | None:
+    """Parse sixteen row-major floats into ``4×4`` **camera~0 → evaluation world**; ``None`` if invalid or all-zero."""
+    a = np.asarray(list(values), dtype=np.float64).ravel()
+    if a.size != 16:
+        return None
+    T = a.reshape((4, 4), order="C")
+    if not np.all(np.isfinite(T)):
+        return None
+    if np.allclose(T, 0.0):
+        return None
+    R = T[:3, :3]
+    if abs(np.linalg.det(R)) < 1e-12:
+        return None
+    return T.astype(np.float64)
+
+
+def save_sparse_map_eval_world_npz(
+    path: Path, points_cam0_xyz: np.ndarray, eval_world_T_camera0: np.ndarray
+) -> None:
+    """Save ``points`` in evaluation world: ``X_eval = T @ homog(X_cam0)`` (``T`` = ``eval_world_T_camera0``)."""
+    X = np.asarray(points_cam0_xyz, dtype=np.float64)
+    if X.size == 0:
+        np.savez_compressed(str(path), points=np.zeros((0, 3), dtype=np.float64))
+        return
+    T = np.asarray(eval_world_T_camera0, dtype=np.float64)
+    Xh = np.vstack([X.T, np.ones((1, X.shape[0]))])
+    Xe = (T @ Xh)[:3].T.astype(np.float64)
+    np.savez_compressed(str(path), points=Xe)
+
+
+def transform_points_world_T_camera(points_nx3: np.ndarray, world_T_camera: np.ndarray) -> np.ndarray:
+    """Map N×3 points in **camera** frame to **world**: ``X_w = R @ X_c + t`` (``world_T_camera`` = cam→world)."""
+    T = np.asarray(world_T_camera, dtype=np.float64)
+    R = T[:3, :3]
+    t = T[:3, 3]
+    p = np.asarray(points_nx3, dtype=np.float64)
+    if p.size == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    return (p @ R.T) + t
 
 
 def save_sparse_map_npz(path: Path, points_xyz: np.ndarray) -> None:

@@ -27,18 +27,23 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from rclpy.time import Time
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, PointCloud2, PointField
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from incremental_vo_ros2.support import (
     BufferedFrame,
     ensure_pipeline_on_path,
+    eval_world_T_camera0_from_parameter,
     odom_position_xyz,
     odom_to_cam_to_world_T,
     pose_stamped_to_world_T_camera,
     ros_image_to_gray,
     save_keyframe_manifest,
+    save_sparse_map_eval_world_npz,
     save_sparse_map_npz,
+    transform_points_world_T_camera,
     world_T_camera_to_quaternion_xyzw,
 )
 
@@ -60,6 +65,15 @@ def _odom_qos() -> QoSProfile:
         durability=DurabilityPolicy.VOLATILE,
         history=HistoryPolicy.KEEP_LAST,
         depth=10,
+    )
+
+
+def _sparse_map_qos() -> QoSProfile:
+    return QoSProfile(
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.VOLATILE,
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
     )
 
 
@@ -93,6 +107,13 @@ class IncrementalVoNode(Node):
         self.declare_parameter("camera_cy", -1.0)
         self.declare_parameter("pair_lookback", 1)
 
+        # Live sparse map (``sensor_msgs/PointCloud2``, metric world = odometry parent frame).
+        self.declare_parameter("publish_sparse_map", True)
+        self.declare_parameter("sparse_map_topic", "sparse_map")
+        self.declare_parameter("sparse_map_publish_period_s", 1.0)
+        self.declare_parameter("sparse_map_frame_id", "")
+        self.declare_parameter("save_run_on_shutdown", False)
+
         # Optional TF debug (off by default for rosbag-focused runs).
         self.declare_parameter("base_frame", "uav1/base_link")
         self.declare_parameter("camera_frame", "uav1/stereo/left_optical")
@@ -119,6 +140,7 @@ class IncrementalVoNode(Node):
         self.declare_parameter("ekf_sigma_odom_position", 0.02)
         self.declare_parameter("ekf_sigma_velocity", 0.3)
         self.declare_parameter("ekf_sigma_vo_position", 2.0)
+        self.declare_parameter("eval_world_T_camera0", [0.0] * 16)
 
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         odom_main_topic = self.get_parameter("odom_main_topic").get_parameter_value().string_value
@@ -171,6 +193,9 @@ class IncrementalVoNode(Node):
         self._ekf_sigma_vo_position = float(
             self.get_parameter("ekf_sigma_vo_position").get_parameter_value().double_value
         )
+        eval_param = self.get_parameter("eval_world_T_camera0").value
+        eval_seq = eval_param if isinstance(eval_param, (list, tuple)) else []
+        self._eval_world_T_cam0 = eval_world_T_camera0_from_parameter(eval_seq)
 
         self._feature_method = (
             self.get_parameter("feature_method").get_parameter_value().string_value.strip().upper()
@@ -189,6 +214,22 @@ class IncrementalVoNode(Node):
         )
         self._descriptor_ratio_second_best = float(
             self.get_parameter("descriptor_ratio_second_best").get_parameter_value().double_value
+        )
+        self._publish_sparse_map = (
+            self.get_parameter("publish_sparse_map").get_parameter_value().bool_value
+        )
+        self._sparse_map_topic = (
+            self.get_parameter("sparse_map_topic").get_parameter_value().string_value
+        )
+        sparse_period = float(
+            self.get_parameter("sparse_map_publish_period_s").get_parameter_value().double_value
+        )
+        self._sparse_map_period_s = max(0.05, sparse_period)
+        self._sparse_map_frame_id_override = (
+            self.get_parameter("sparse_map_frame_id").get_parameter_value().string_value.strip()
+        )
+        self._save_run_on_shutdown = (
+            self.get_parameter("save_run_on_shutdown").get_parameter_value().bool_value
         )
 
         self._pose_fusion = None
@@ -233,11 +274,23 @@ class IncrementalVoNode(Node):
         self._last_kf_pos: np.ndarray | None = None
         self._inc_map = None
         self._desc_map = None
-        self._world_T_camera_0: np.ndarray | None = None
         self._effective_desc_cfg = None
         self._persisted = False
+        self._world_T_camera_raw: list[np.ndarray] = []
         self._tf_buffer: Buffer | None = None
         self._tf_listener: TransformListener | None = None
+
+        self._sparse_map_pub = None
+        self._sparse_map_fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        ]
+        if self._publish_sparse_map:
+            self._sparse_map_pub = self.create_publisher(
+                PointCloud2, self._sparse_map_topic, _sparse_map_qos()
+            )
+            self.create_timer(self._sparse_map_period_s, self._on_sparse_map_timer)
 
         self.create_subscription(Image, image_topic, self._on_image, _sensor_data_qos())
         self.create_subscription(Odometry, odom_main_topic, self._on_odom_main, _odom_qos())
@@ -285,6 +338,19 @@ class IncrementalVoNode(Node):
                 if tf_period > 0.0
                 else " | TF listener disabled (tf_lookup_period_s=0)"
             )
+            + (
+                (
+                    f" | sparse_map topic={self._sparse_map_topic!r} every {self._sparse_map_period_s}s "
+                    + (
+                        f"frame_id={self._sparse_map_frame_id_override!r}"
+                        if self._sparse_map_frame_id_override
+                        else "frame_id=odom.header.frame_id"
+                    )
+                )
+                if self._publish_sparse_map
+                else " | sparse_map publishing disabled"
+            )
+            + f" | save_run_on_shutdown={self._save_run_on_shutdown}"
         )
 
     def _ensure_K(self, msg: Image) -> None:
@@ -452,15 +518,16 @@ class IncrementalVoNode(Node):
         self._commit_keyframe(chosen, distance_trigger_m=dist)
 
     def _commit_keyframe(self, bf: BufferedFrame, *, distance_trigger_m: float | None) -> None:
-        idx = len(self._world_T_camera)
+        from pipeline.geometry import canonicalize_world_T_camera_to_first
+
+        idx = len(self._world_T_camera_raw)
         img_rel = f"images/kf_{idx:05d}.png"
         img_path = self._run_dir / img_rel
         cv2.imwrite(str(img_path), bf.gray)
 
-        self._world_T_camera.append(bf.cam_to_world.copy())
+        self._world_T_camera_raw.append(bf.cam_to_world.copy())
+        self._world_T_camera[:] = canonicalize_world_T_camera_to_first(self._world_T_camera_raw)
         self._gray_kf.append(bf.gray)
-        if idx == 0:
-            self._world_T_camera_0 = bf.cam_to_world.copy()
 
         rec = {
             "index": idx,
@@ -496,10 +563,10 @@ class IncrementalVoNode(Node):
                     if (
                         tw.scale_ok
                         and self._desc_map is not None
-                        and self._world_T_camera_0 is not None
+                        and len(self._world_T_camera) > 0
                     ):
                         try:
-                            self._desc_map.integrate(tw, self._world_T_camera_0)
+                            self._desc_map.integrate(tw, self._world_T_camera[0])
                         except Exception as ex:
                             self.get_logger().warn(
                                 f"DescriptorLandmarkMap.integrate failed for ({i}->{idx}): {ex}"
@@ -554,6 +621,28 @@ class IncrementalVoNode(Node):
             f"(image stamp {self._last_image_msg.header.stamp.sec}.{self._last_image_msg.header.stamp.nanosec:09d})"
         )
 
+    def _on_sparse_map_timer(self) -> None:
+        pub = self._sparse_map_pub
+        if pub is None or self._desc_map is None or not self._world_T_camera_raw:
+            return
+        pts_c = self._desc_map.positions_cam0()
+        if pts_c.size == 0:
+            return
+        W0 = self._world_T_camera_raw[0]
+        pts_w = transform_points_world_T_camera(pts_c, W0)
+        if self._sparse_map_frame_id_override:
+            fid = self._sparse_map_frame_id_override
+        elif self._last_odom is not None:
+            fid = self._last_odom.header.frame_id
+        else:
+            return
+        hdr = Header()
+        hdr.stamp = self.get_clock().now().to_msg()
+        hdr.frame_id = fid
+        tuples = [(float(r[0]), float(r[1]), float(r[2])) for r in pts_w]
+        cloud = point_cloud2.create_cloud(hdr, self._sparse_map_fields, tuples)
+        pub.publish(cloud)
+
     def persist_run(self) -> None:
         if self._persisted:
             return
@@ -589,11 +678,21 @@ class IncrementalVoNode(Node):
                 else None
             ),
             landmarks_reference_frame="camera_0" if self._desc_map is not None else None,
+            map_coordinate_frame="camera0",
+            eval_world_T_camera0_flat16=(
+                self._eval_world_T_cam0.reshape(16).tolist()
+                if self._eval_world_T_cam0 is not None
+                else None
+            ),
         )
         pts = np.zeros((0, 3), dtype=np.float64)
         if self._desc_map is not None:
             pts = self._desc_map.positions_cam0()
         save_sparse_map_npz(self._run_dir / "sparse_map.npz", pts)
+        if self._eval_world_T_cam0 is not None:
+            save_sparse_map_eval_world_npz(
+                self._run_dir / "sparse_map_eval_world.npz", pts, self._eval_world_T_cam0
+            )
         if self._desc_map is not None:
             try:
                 from pipeline.descriptor_landmark_map import export_landmarks_csv
@@ -610,7 +709,8 @@ class IncrementalVoNode(Node):
 
     def destroy_node(self) -> None:
         try:
-            self.persist_run()
+            if self._save_run_on_shutdown:
+                self.persist_run()
         finally:
             super().destroy_node()
 
