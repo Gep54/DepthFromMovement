@@ -15,6 +15,29 @@ from geometry_msgs.msg import Quaternion
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
 
+from incremental_vo_ros2.range_gate import (
+    consecutive_keyframe_baseline_m,
+    max_sparse_range_m,
+)
+
+__all__ = [
+    "BufferedFrame",
+    "consecutive_keyframe_baseline_m",
+    "ensure_pipeline_on_path",
+    "eval_world_T_camera0_from_parameter",
+    "max_sparse_range_m",
+    "odom_position_xyz",
+    "odom_to_cam_to_world_T",
+    "pose_stamped_to_world_T_camera",
+    "quat_msg_to_mat",
+    "ros_image_to_gray",
+    "save_keyframe_manifest",
+    "save_sparse_map_eval_world_npz",
+    "save_sparse_map_npz",
+    "transform_points_world_T_camera",
+    "world_T_camera_to_quaternion_xyzw",
+]
+
 
 def ensure_pipeline_on_path() -> Path | None:
     """Insert DepthFromMovement repo root on ``sys.path`` so ``pipeline.*`` imports work."""

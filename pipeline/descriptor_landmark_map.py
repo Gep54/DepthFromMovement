@@ -69,6 +69,20 @@ class DescriptorLandmarkMap:
             return np.zeros((0, 3), dtype=np.float64)
         return np.stack([lm.position_cam0 for lm in self.landmarks], axis=0)
 
+    def prune_beyond_range_cam0(self, max_range_m: float) -> int:
+        """Drop landmarks with ``||position_cam0|| > max_range_m``; return count removed."""
+        if max_range_m <= 0.0 or not self.landmarks:
+            return 0
+        kept: list[DescriptorLandmark] = []
+        removed = 0
+        for lm in self.landmarks:
+            if float(np.linalg.norm(lm.position_cam0)) > max_range_m:
+                removed += 1
+            else:
+                kept.append(lm)
+        self.landmarks = kept
+        return removed
+
     def _nearest_landmark(self, d_obs: np.ndarray) -> tuple[int, float, float]:
         """Return (index, best_distance, second_best_distance). ``index=-1`` if empty."""
         if not self.landmarks:
@@ -92,7 +106,13 @@ class DescriptorLandmarkMap:
             return float(np.clip(b, 1e-6, 1.0))
         return 1.0 / float(lm.n_updates + 1)
 
-    def integrate(self, tw: TwoViewResult, world_T_camera_0: np.ndarray) -> None:
+    def integrate(
+        self,
+        tw: TwoViewResult,
+        world_T_camera_0: np.ndarray,
+        *,
+        max_range_cam0: float | None = None,
+    ) -> None:
         """Ingest triangulated points from ``tw``; transform to cam0 before fusion."""
         if tw.descriptors is None or tw.descriptors.shape[0] == 0:
             return
@@ -110,6 +130,8 @@ class DescriptorLandmarkMap:
             if not np.all(np.isfinite(Xw)):
                 continue
             X_cam0 = world_point_to_cam0(Xw, W0)
+            if max_range_cam0 is not None and float(np.linalg.norm(X_cam0)) > max_range_cam0:
+                continue
             d_obs = tw.descriptors[k]
 
             best_i, best_d, second_d = self._nearest_landmark(d_obs)
