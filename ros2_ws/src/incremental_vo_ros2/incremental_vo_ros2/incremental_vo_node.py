@@ -112,7 +112,7 @@ class IncrementalVoNode(Node):
     """Distance-based keyframes, pluggable metric pose fusion, two-view sparse triangulation."""
 
     def __init__(self) -> None:
-        super().__init__("incremental_vo_node", automatically_declare_parameters_from_overrides=True)
+        super().__init__("incremental_vo_node")
 
         repo = ensure_pipeline_on_path()
         if repo is None:

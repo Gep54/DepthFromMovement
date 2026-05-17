@@ -98,6 +98,8 @@ def load_env_config(path: Path) -> dict[str, str]:
 def coerce_ros_param_value(raw: str) -> str:
     """Format a string value for ROS ``-p name:=value`` injection."""
     s = raw.strip()
+    if not s:
+        return '""'
     lower = s.lower()
     if lower in ("true", "false"):
         return lower
@@ -260,7 +262,9 @@ def apply_config_to_argv(argv: list[str] | None = None) -> list[str]:
     cli_known = {k: v for k, v in cli_params.items() if k in KNOWN_PARAMETERS}
     cli_unknown = {k: v for k, v in cli_params.items() if k not in KNOWN_PARAMETERS}
 
-    merged_known = {**file_known, **cli_known}
+    merged_known = {
+        k: v for k, v in {**file_known, **cli_known}.items() if v.strip() != ""
+    }
 
     rebuilt = _strip_known_p_from_ros_args(stripped)
     if merged_known:

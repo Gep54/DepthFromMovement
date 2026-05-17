@@ -38,6 +38,7 @@ def test_load_env_config_basic(tmp_path: Path) -> None:
 
 
 def test_coerce_ros_param_value() -> None:
+    assert coerce_ros_param_value("") == '""'
     assert coerce_ros_param_value("true") == "true"
     assert coerce_ros_param_value("FALSE") == "false"
     assert coerce_ros_param_value("1") == "true"
@@ -135,6 +136,27 @@ def test_apply_config_missing_file_raises(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.delenv("INCREMENTAL_VO_CONFIG", raising=False)
     with pytest.raises(FileNotFoundError):
         apply_config_to_argv(["--config-file", str(tmp_path / "missing.env")])
+
+
+def test_apply_config_skips_empty_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "configuration.env"
+    cfg.write_text(
+        "sparse_map_frame_id=\n"
+        "keyframe_distance_m=0.42\n"
+        "provided_pose_topic=\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("INCREMENTAL_VO_CONFIG", raising=False)
+
+    argv = apply_config_to_argv(["--config-file", str(cfg)])
+    merged = extract_cli_param_overrides(argv)
+    assert "sparse_map_frame_id" not in merged
+    assert "provided_pose_topic" not in merged
+    assert merged["keyframe_distance_m"] == "0.42"
+    for tok in argv:
+        if ":=" in tok:
+            assert tok.partition(":=")[2] != "", tok
 
 
 def test_apply_config_camera_info_qos_durability(
