@@ -33,6 +33,7 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
 from incremental_vo_ros2.param_config import apply_config_to_argv
 from incremental_vo_ros2.support import (
     BufferedFrame,
@@ -135,6 +136,12 @@ class IncrementalVoNode(Node):
         self.declare_parameter("sparse_map_frame_id", "")
         self.declare_parameter("sparse_map_max_range_baseline_factor", 100.0)
         self.declare_parameter("save_run_on_shutdown", False)
+
+        # Offline dataset export (``load_dataset`` / ``dfm-export-steps``-ready layout).
+        self.declare_parameter("export_offline_dataset", False)
+        self.declare_parameter("offline_dataset_root", "")
+        self.declare_parameter("offline_dataset_image_prefix", "frame")
+        self.declare_parameter("offline_dataset_pose_source", "odom")
 
         # Optional TF debug (off by default for rosbag-focused runs).
         self.declare_parameter("base_frame", "uav1/base_link")
@@ -240,6 +247,30 @@ class IncrementalVoNode(Node):
         self._save_run_on_shutdown = (
             self.get_parameter("save_run_on_shutdown").get_parameter_value().bool_value
         )
+        self._export_offline_dataset = (
+            self.get_parameter("export_offline_dataset").get_parameter_value().bool_value
+        )
+        offline_root_param = (
+            self.get_parameter("offline_dataset_root").get_parameter_value().string_value.strip()
+        )
+        self._offline_image_prefix = (
+            self.get_parameter("offline_dataset_image_prefix")
+            .get_parameter_value()
+            .string_value.strip()
+            or "frame"
+        )
+        pose_src = (
+            self.get_parameter("offline_dataset_pose_source")
+            .get_parameter_value()
+            .string_value.strip()
+            .lower()
+        )
+        if pose_src not in ("odom", "fused"):
+            self.get_logger().warning(
+                f"offline_dataset_pose_source={pose_src!r} not in {{odom,fused}}; using odom."
+            )
+            pose_src = "odom"
+        self._offline_pose_source = pose_src
         self._sparse_map_range_factor = float(
             self.get_parameter("sparse_map_max_range_baseline_factor")
             .get_parameter_value()
@@ -267,7 +298,20 @@ class IncrementalVoNode(Node):
         stamp_tag = time.strftime("%Y%m%d_%H%M%S")
         self._run_dir = (out_root.resolve() / "ros2_runs" / f"run_{stamp_tag}").resolve()
         self._run_dir.mkdir(parents=True, exist_ok=True)
-        (self._run_dir / "images").mkdir(exist_ok=True)
+        if self._save_run_on_shutdown:
+            (self._run_dir / "images").mkdir(exist_ok=True)
+
+        self._offline_dataset_dir: Path | None = None
+        self._offline_motion_frames: list[dict] = []
+        if self._export_offline_dataset:
+            if offline_root_param:
+                self._offline_dataset_dir = Path(offline_root_param).expanduser().resolve()
+            else:
+                self._offline_dataset_dir = (
+                    out_root.resolve() / "offline_datasets" / f"run_{stamp_tag}"
+                ).resolve()
+            self._offline_dataset_dir.mkdir(parents=True, exist_ok=True)
+            (self._offline_dataset_dir / "images").mkdir(exist_ok=True)
 
         self._calibration = None
         self._K: np.ndarray | None = None
@@ -356,6 +400,12 @@ class IncrementalVoNode(Node):
                 else " | sparse_map publishing disabled"
             )
             + f" | save_run_on_shutdown={self._save_run_on_shutdown}"
+            + (
+                f" | offline_dataset={self._offline_dataset_dir!s} "
+                f"pose_source={self._offline_pose_source!r} prefix={self._offline_image_prefix!r}"
+                if self._offline_dataset_dir is not None
+                else " | offline_dataset export disabled"
+            )
             + (
                 f" | sparse_map_max_range_baseline_factor={self._sparse_map_range_factor}"
                 if self._sparse_map_range_factor > 0.0
@@ -502,6 +552,7 @@ class IncrementalVoNode(Node):
             self._maybe_log_image_throttle(msg)
             return
         T, pos = self._fused_cam_to_world_and_pos()
+        odom_T = odom_to_cam_to_world_T(self._last_odom)
         qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T)
         bf = BufferedFrame(
             stamp_sec=msg.header.stamp.sec,
@@ -509,6 +560,7 @@ class IncrementalVoNode(Node):
             image_msg=copy_image_msg(msg),
             pos_odom=pos,
             cam_to_world=T,
+            odom_cam_to_world=odom_T,
             qx=float(qx),
             qy=float(qy),
             qz=float(qz),
@@ -594,9 +646,32 @@ class IncrementalVoNode(Node):
             self._init_map_if_possible()
 
         idx = len(self._world_T_camera_raw)
-        img_rel = f"images/kf_{idx:05d}.png"
-        img_path = self._run_dir / img_rel
-        cv2.imwrite(str(img_path), gray)
+
+        log_path = ""
+        manifest_path = ""
+        if self._offline_dataset_dir is not None:
+            stem = offline_dataset_image_basename(self._offline_image_prefix, idx)
+            offline_path = self._offline_dataset_dir / "images" / stem
+            cv2.imwrite(str(offline_path), gray)
+            T_export = (
+                bf.odom_cam_to_world
+                if self._offline_pose_source == "odom"
+                else bf.cam_to_world
+            )
+            self._offline_motion_frames.append(
+                {"index": idx, "filename": stem, "T": T_export.tolist()}
+            )
+            self._write_offline_motion_json()
+            log_path = f"images/{stem}"
+
+        if self._save_run_on_shutdown:
+            kf_rel = f"images/kf_{idx:05d}.png"
+            cv2.imwrite(str(self._run_dir / kf_rel), gray)
+            manifest_path = kf_rel
+            if not log_path:
+                log_path = kf_rel
+        elif log_path:
+            manifest_path = log_path
 
         self._world_T_camera_raw.append(bf.cam_to_world.copy())
         self._world_T_camera[:] = canonicalize_world_T_camera_to_first(self._world_T_camera_raw)
@@ -612,14 +687,15 @@ class IncrementalVoNode(Node):
                 "z": bf.qz,
                 "w": bf.qw,
             },
-            "image_path": img_rel.replace("\\", "/"),
+            "image_path": manifest_path.replace("\\", "/"),
             "distance_from_previous_keyframe_m": distance_trigger_m,
         }
         self._kf_records.append(rec)
         self._last_kf_pos = bf.pos_odom.copy()
 
+        saved = log_path or f"keyframe {idx} (no image export)"
         msg = (
-            f"Keyframe {idx}: saved {img_rel} | pos=({bf.pos_odom[0]:.3f},{bf.pos_odom[1]:.3f},{bf.pos_odom[2]:.3f})"
+            f"Keyframe {idx}: saved {saved} | pos=({bf.pos_odom[0]:.3f},{bf.pos_odom[1]:.3f},{bf.pos_odom[2]:.3f})"
         )
         if distance_trigger_m is not None:
             msg += f" | odom spacing ~{distance_trigger_m:.3f} m (threshold {self._d})"
@@ -720,6 +796,45 @@ class IncrementalVoNode(Node):
         cloud = point_cloud2.create_cloud(hdr, self._sparse_map_fields, tuples)
         pub.publish(cloud)
 
+    def _write_offline_motion_json(self) -> None:
+        if self._offline_dataset_dir is None or not self._offline_motion_frames:
+            return
+        if self._repo_root is None:
+            return
+        try:
+            from data.io_json import save_motion_json
+
+            transforms = [
+                np.asarray(fr["T"], dtype=np.float64) for fr in self._offline_motion_frames
+            ]
+            filenames = [str(fr["filename"]) for fr in self._offline_motion_frames]
+            save_motion_json(
+                self._offline_dataset_dir / "motion.json",
+                transforms,
+                filenames=filenames,
+            )
+        except Exception as e:
+            self.get_logger().warn(f"save_motion_json failed: {e}")
+
+    def persist_offline_dataset(self) -> None:
+        if self._offline_dataset_dir is None:
+            return
+        if self._calibration is not None and self._repo_root is not None:
+            try:
+                from data.io_json import save_calibration_json
+
+                save_calibration_json(
+                    self._offline_dataset_dir / "calibration.json", self._calibration
+                )
+            except Exception as e:
+                self.get_logger().warn(f"offline save_calibration_json failed: {e}")
+        self._write_offline_motion_json()
+        n = len(self._offline_motion_frames)
+        self.get_logger().info(
+            f"Offline dataset: {self._offline_dataset_dir} ({n} frames, motion pose_source="
+            f"{self._offline_pose_source!r})"
+        )
+
     def persist_run(self) -> None:
         if self._persisted:
             return
@@ -794,6 +909,8 @@ class IncrementalVoNode(Node):
         try:
             if self._save_run_on_shutdown:
                 self.persist_run()
+            if self._export_offline_dataset:
+                self.persist_offline_dataset()
         finally:
             super().destroy_node()
 

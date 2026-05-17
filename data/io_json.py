@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
 from data.schema import Calibration, MotionSpec
+
+PoseConvention = Literal["world_T_camera", "camera_T_world"]
+MotionRepresentation = Literal["absolute", "relative_to_prev"]
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -62,6 +66,38 @@ def load_motion_json(path: Path) -> MotionSpec:
         representation=representation,  # type: ignore[arg-type]
         transforms=transforms,
     )
+
+
+def save_motion_json(
+    path: Path,
+    transforms: Sequence[np.ndarray],
+    *,
+    pose_convention: PoseConvention = "world_T_camera",
+    representation: MotionRepresentation = "absolute",
+    filenames: Sequence[str] | None = None,
+) -> None:
+    """Write ``motion.json`` in the same schema as :func:`load_motion_json`."""
+    if filenames is not None and len(filenames) != len(transforms):
+        raise ValueError(
+            f"filenames length {len(filenames)} != transforms length {len(transforms)}"
+        )
+    frames: list[dict[str, Any]] = []
+    for i, T in enumerate(transforms):
+        Ta = np.asarray(T, dtype=np.float64)
+        if Ta.shape == (3, 4):
+            row = np.eye(4, dtype=np.float64)
+            row[:3, :4] = Ta
+            Ta = row
+        fr: dict[str, Any] = {"index": i, "T": Ta.tolist()}
+        if filenames is not None:
+            fr["filename"] = filenames[i]
+        frames.append(fr)
+    payload = {
+        "pose_convention": pose_convention,
+        "representation": representation,
+        "frames": frames,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def _inv_se3(T: np.ndarray) -> np.ndarray:

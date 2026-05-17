@@ -21,6 +21,7 @@ from incremental_vo_ros2.image_buffer import (
     ros_image_to_gray,
     should_buffer_image,
 )
+from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
 from incremental_vo_ros2.range_gate import (
     consecutive_keyframe_baseline_m,
     max_sparse_range_m,
@@ -37,6 +38,7 @@ __all__ = [
     "max_sparse_range_m",
     "odom_position_xyz",
     "odom_to_cam_to_world_T",
+    "offline_dataset_image_basename",
     "pose_stamped_to_world_T_camera",
     "quat_msg_to_mat",
     "ros_image_to_gray",
@@ -189,6 +191,7 @@ class BufferedFrame:
     image_msg: Image
     pos_odom: np.ndarray  # (3,) translation used for keyframe distance (fused when fusion active)
     cam_to_world: np.ndarray  # 4×4 fused camera→world for triangulation
+    odom_cam_to_world: np.ndarray  # 4×4 raw odom_main camera→world at buffer time
     qx: float
     qy: float
     qz: float
