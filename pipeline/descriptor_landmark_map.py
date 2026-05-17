@@ -19,6 +19,13 @@ def world_point_to_cam0(X_w: np.ndarray, world_T_camera_0: np.ndarray) -> np.nda
     return (T_c0_w @ Xh)[:3].astype(np.float64)
 
 
+def within_merge_sphere(p: np.ndarray, q: np.ndarray, radius_m: float) -> bool:
+    """True if ``p`` and ``q`` lie within a sphere of radius ``radius_m`` (cam0 frame)."""
+    return float(np.linalg.norm(np.asarray(p, dtype=np.float64) - np.asarray(q, dtype=np.float64))) <= float(
+        radius_m
+    )
+
+
 def descriptor_distance(a: np.ndarray, b: np.ndarray, method: Literal["ORB", "SIFT"]) -> float:
     aa = np.asarray(a).ravel()
     bb = np.asarray(b).ravel()
@@ -38,6 +45,8 @@ class DescriptorMapConfig:
     """ORB: Hamming threshold; SIFT: L2 threshold."""
     ratio_second_best: float | None = None
     """If set, require ``best < ratio * second`` (Lowe-style)."""
+    spatial_merge_radius_m: float | None = None
+    """If set, descriptor matches merge only when 3D distance in cam0 <= this value."""
 
     @staticmethod
     def defaults(method: Literal["ORB", "SIFT"]) -> DescriptorMapConfig:
@@ -106,12 +115,27 @@ class DescriptorLandmarkMap:
             return float(np.clip(b, 1e-6, 1.0))
         return 1.0 / float(lm.n_updates + 1)
 
+    def _append_landmark(self, X_cam0: np.ndarray, d_obs: np.ndarray) -> None:
+        lid = self._next_id
+        self._next_id += 1
+        desc_copy = np.array(d_obs, copy=True, dtype=d_obs.dtype)
+        self.landmarks.append(
+            DescriptorLandmark(
+                id=lid,
+                position_cam0=X_cam0.copy(),
+                n_updates=1,
+                descriptor=desc_copy,
+                best_merge_distance=float("inf"),
+            )
+        )
+
     def integrate(
         self,
         tw: TwoViewResult,
         world_T_camera_0: np.ndarray,
         *,
         max_range_cam0: float | None = None,
+        spatial_merge_radius_m: float | None = None,
     ) -> None:
         """Ingest triangulated points from ``tw``; transform to cam0 before fusion."""
         if tw.descriptors is None or tw.descriptors.shape[0] == 0:
@@ -122,6 +146,11 @@ class DescriptorLandmarkMap:
                 f"descriptors rows ({tw.descriptors.shape[0]}) != X columns ({n})"
             )
         W0 = np.asarray(world_T_camera_0, dtype=np.float64)
+        radius = (
+            spatial_merge_radius_m
+            if spatial_merge_radius_m is not None
+            else self.cfg.spatial_merge_radius_m
+        )
 
         for k in range(n):
             if not tw.cheiral_mask[k]:
@@ -150,21 +179,14 @@ class DescriptorLandmarkMap:
                 or best_d > self.cfg.max_match_distance
                 or reject_ratio
             ):
-                lid = self._next_id
-                self._next_id += 1
-                desc_copy = np.array(d_obs, copy=True, dtype=d_obs.dtype)
-                self.landmarks.append(
-                    DescriptorLandmark(
-                        id=lid,
-                        position_cam0=X_cam0.copy(),
-                        n_updates=1,
-                        descriptor=desc_copy,
-                        best_merge_distance=float("inf"),
-                    )
-                )
+                self._append_landmark(X_cam0, d_obs)
                 continue
 
             lm = self.landmarks[best_i]
+            if radius is not None and radius > 0 and not within_merge_sphere(X_cam0, lm.position_cam0, radius):
+                self._append_landmark(X_cam0, d_obs)
+                continue
+
             beta = self._merge_beta_eff(lm)
             lm.position_cam0 = (1.0 - beta) * lm.position_cam0 + beta * X_cam0
             lm.n_updates += 1

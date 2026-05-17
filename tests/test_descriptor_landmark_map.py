@@ -11,6 +11,7 @@ from pipeline.descriptor_landmark_map import (
     DescriptorMapConfig,
     descriptor_distance,
     export_landmarks_csv,
+    within_merge_sphere,
     world_point_to_cam0,
 )
 from pipeline.map import TwoViewResult
@@ -150,10 +151,76 @@ def test_descriptor_distance_orb() -> None:
     assert descriptor_distance(a, b, "ORB") == 0.0
 
 
+def test_within_merge_sphere() -> None:
+    assert within_merge_sphere(np.array([0.0, 0.0, 0.0]), np.array([0.5, 0.0, 0.0]), 1.0)
+    assert not within_merge_sphere(np.array([0.0, 0.0, 0.0]), np.array([2.0, 0.0, 0.0]), 1.0)
+
+
+def _tw_single_point(z: float, descriptor: np.ndarray) -> TwoViewResult:
+    X = np.zeros((4, 1), dtype=np.float64)
+    X[:3, 0] = [0.0, 0.0, z]
+    X[3, 0] = 1.0
+    return TwoViewResult(
+        frame_i=0,
+        frame_j=1,
+        pts1=np.zeros((1, 2), np.float32),
+        pts2=np.zeros((1, 2), np.float32),
+        inlier_mask=np.ones((1, 1), np.uint8),
+        E=None,
+        R_est=None,
+        t_est=None,
+        scale=1.0,
+        scale_ok=True,
+        X_world_h=X,
+        cheiral_mask=np.array([True]),
+        reproj={},
+        descriptors=descriptor.reshape(1, -1).copy(),
+    )
+
+
+def test_spatial_gate_rejects_distant_descriptor_match() -> None:
+    cfg = DescriptorMapConfig(
+        method="ORB",
+        merge_beta=None,
+        max_match_distance=256.0,
+        spatial_merge_radius_m=1.0,
+    )
+    m = DescriptorLandmarkMap(cfg)
+    W0 = np.eye(4, dtype=np.float64)
+    d = np.zeros((32,), dtype=np.uint8)
+    m.integrate(_tw_single_point(2.0, d), W0)
+    m.integrate(_tw_single_point(10.0, d), W0)
+    assert len(m.landmarks) == 2
+
+
+def test_spatial_gate_allows_near_descriptor_match() -> None:
+    cfg = DescriptorMapConfig(
+        method="ORB",
+        merge_beta=None,
+        max_match_distance=256.0,
+        spatial_merge_radius_m=1.0,
+    )
+    m = DescriptorLandmarkMap(cfg)
+    W0 = np.eye(4, dtype=np.float64)
+    d = np.zeros((32,), dtype=np.uint8)
+    m.integrate(_tw_single_point(2.0, d), W0)
+    m.integrate(_tw_single_point(2.5, d), W0)
+    assert len(m.landmarks) == 1
+    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 2.25)
+
+
 def test_load_descriptor_map_json_defaults(tmp_path: Path) -> None:
     cfg = load_descriptor_map_json(tmp_path / "missing.json", "ORB")
     assert cfg.merge_beta is None
     assert cfg.max_match_distance == 64.0
+    assert cfg.spatial_merge_radius_m is None
+
+
+def test_load_descriptor_map_json_spatial_radius(tmp_path: Path) -> None:
+    path = tmp_path / "descriptor_map.json"
+    path.write_text('{"spatial_merge_radius_m": 0.5}', encoding="utf-8")
+    cfg = load_descriptor_map_json(path, "ORB")
+    assert cfg.spatial_merge_radius_m == 0.5
 
 
 def test_integrate_max_range_cam0_skips_far_points() -> None:

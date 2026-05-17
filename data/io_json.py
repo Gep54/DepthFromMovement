@@ -30,6 +30,16 @@ def load_calibration_json(path: Path) -> Calibration:
     return Calibration(K=K, dist_coeffs=dist_arr, image_size=image_size)
 
 
+def save_calibration_json(path: Path, cal: Calibration) -> None:
+    """Write ``calibration.json`` in the same schema as :func:`load_calibration_json`."""
+    payload: dict[str, Any] = {"K": cal.K.tolist()}
+    if cal.dist_coeffs is not None and cal.dist_coeffs.size > 0:
+        payload["dist_coeffs"] = cal.dist_coeffs.reshape(-1).tolist()
+    if cal.image_size is not None:
+        payload["image_size"] = [int(cal.image_size[0]), int(cal.image_size[1])]
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def load_motion_json(path: Path) -> MotionSpec:
     raw = _read_json(path)
     pose_convention = raw.get("pose_convention", "world_T_camera")

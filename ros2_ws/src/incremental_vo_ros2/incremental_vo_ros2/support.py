@@ -13,8 +13,14 @@ import cv2
 import numpy as np
 from geometry_msgs.msg import Quaternion
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CameraInfo, Image
 
+from incremental_vo_ros2.image_buffer import (
+    copy_image_msg,
+    image_msg_to_gray_undistorted,
+    ros_image_to_gray,
+    should_buffer_image,
+)
 from incremental_vo_ros2.range_gate import (
     consecutive_keyframe_baseline_m,
     max_sparse_range_m,
@@ -22,9 +28,12 @@ from incremental_vo_ros2.range_gate import (
 
 __all__ = [
     "BufferedFrame",
+    "camera_info_to_calibration",
     "consecutive_keyframe_baseline_m",
+    "copy_image_msg",
     "ensure_pipeline_on_path",
     "eval_world_T_camera0_from_parameter",
+    "image_msg_to_gray_undistorted",
     "max_sparse_range_m",
     "odom_position_xyz",
     "odom_to_cam_to_world_T",
@@ -34,7 +43,10 @@ __all__ = [
     "save_keyframe_manifest",
     "save_sparse_map_eval_world_npz",
     "save_sparse_map_npz",
+    "should_buffer_image",
     "transform_points_world_T_camera",
+    "effective_K_from_calibration",
+    "undistort_gray_if_needed",
     "world_T_camera_to_quaternion_xyzw",
 ]
 
@@ -132,33 +144,49 @@ def pose_stamped_to_world_T_camera(msg) -> np.ndarray:
     return T
 
 
-def ros_image_to_gray(msg: Image) -> np.ndarray | None:
-    """Decode ``sensor_msgs/Image`` to single-channel uint8; returns None if encoding unsupported."""
-    h, w = int(msg.height), int(msg.width)
-    arr = np.frombuffer(msg.data, dtype=np.uint8)
-    if msg.encoding in ("mono8", "8UC1"):
-        if arr.size != h * w:
-            return None
-        return arr.reshape((h, w))
-    if msg.encoding in ("bgr8", "8UC3"):
-        if arr.size != h * w * 3:
-            return None
-        bgr = arr.reshape((h, w, 3))
-        return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    if msg.encoding in ("rgb8", "rgba8"):
-        step = 4 if msg.encoding == "rgba8" else 3
-        if arr.size != h * w * step:
-            return None
-        rgb = arr.reshape((h, w, step))[:, :, :3]
-        return cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    return None
+def camera_info_to_calibration(msg: CameraInfo):
+    """``sensor_msgs/CameraInfo`` → :class:`data.schema.Calibration``."""
+    ensure_pipeline_on_path()
+    from data.camera_calibration import calibration_from_intrinsics
+
+    return calibration_from_intrinsics(
+        K_flat=msg.k,
+        D=msg.d,
+        width=int(msg.width),
+        height=int(msg.height),
+        distortion_model=msg.distortion_model,
+    )
+
+
+def effective_K_from_calibration(cal) -> np.ndarray:
+    """Intrinsics matrix used for triangulation after optional undistortion."""
+    if cal.dist_coeffs is None or np.linalg.norm(cal.dist_coeffs) < 1e-9:
+        return np.asarray(cal.K, dtype=np.float64)
+    if cal.image_size is None:
+        return np.asarray(cal.K, dtype=np.float64)
+    w, h = cal.image_size
+    new_K, _ = cv2.getOptimalNewCameraMatrix(cal.K, cal.dist_coeffs, (w, h), alpha=0)
+    return np.asarray(new_K, dtype=np.float64)
+
+
+def undistort_gray_if_needed(gray: np.ndarray, cal) -> tuple[np.ndarray, np.ndarray]:
+    """Return (grayscale, K) for feature detection / triangulation.
+
+    When distortion is negligible, returns the input and ``cal.K``. Otherwise
+    undistorts and returns ``new_K`` from ``cv2.getOptimalNewCameraMatrix``.
+    """
+    if cal.dist_coeffs is None or np.linalg.norm(cal.dist_coeffs) < 1e-9:
+        return gray, np.asarray(cal.K, dtype=np.float64)
+    new_K = effective_K_from_calibration(cal)
+    und = cv2.undistort(gray, cal.K, cal.dist_coeffs, None, newK=new_K)
+    return und, new_K
 
 
 @dataclass
 class BufferedFrame:
     stamp_sec: int
     stamp_nsec: int
-    gray: np.ndarray
+    image_msg: Image
     pos_odom: np.ndarray  # (3,) translation used for keyframe distance (fused when fusion active)
     cam_to_world: np.ndarray  # 4×4 fused camera→world for triangulation
     qx: float
@@ -178,7 +206,6 @@ def save_keyframe_manifest(
     pair_lookback: int | None = None,
     fusion_method: str | None = None,
     provided_pose_topic: str | None = None,
-    velocity_topic: str | None = None,
     feature_method: str | None = None,
     feature_n_features: int | None = None,
     descriptor_merge_beta: float | None = None,
@@ -201,8 +228,6 @@ def save_keyframe_manifest(
         payload["fusion_method"] = fusion_method
     if provided_pose_topic is not None:
         payload["provided_pose_topic"] = provided_pose_topic
-    if velocity_topic is not None:
-        payload["velocity_topic"] = velocity_topic
     if feature_method is not None:
         payload["feature_method"] = feature_method
     if feature_n_features is not None:

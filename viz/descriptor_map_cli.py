@@ -30,6 +30,12 @@ def main() -> None:
         help="Override max Hamming (ORB) or L2 (SIFT) for associating observations to landmarks",
     )
     p.add_argument(
+        "--spatial-merge-radius-m",
+        type=float,
+        default=None,
+        help="3D merge gate radius in cam0 (m); omit to use descriptor_map.json or disable",
+    )
+    p.add_argument(
         "--descriptor-map-config",
         type=Path,
         default=None,
@@ -50,6 +56,8 @@ def main() -> None:
         desc_cfg = replace(desc_cfg, merge_beta=float(args.merge_beta))
     if args.descriptor_max_dist is not None:
         desc_cfg = replace(desc_cfg, max_match_distance=float(args.descriptor_max_dist))
+    if args.spatial_merge_radius_m is not None:
+        desc_cfg = replace(desc_cfg, spatial_merge_radius_m=float(args.spatial_merge_radius_m))
 
     desc_map = run_descriptor_landmark_pipeline(
         ds,

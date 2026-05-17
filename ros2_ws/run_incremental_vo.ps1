@@ -4,10 +4,12 @@
   Examples (source ROS 2 / pixi first so colcon and ros2 are on PATH):
     & "C:\...\DepthFromMovement\ros2_ws\run_incremental_vo.ps1"
     & "...\run_incremental_vo.ps1" -SkipBuild
+    & "...\run_incremental_vo.ps1" -SkipBuild -ConfigFile ..\configuration.env
     & "...\run_incremental_vo.ps1" -SkipBuild --ros-args -p use_sim_time:=true
 #>
 param(
-    [switch] $SkipBuild
+    [switch] $SkipBuild,
+    [string] $ConfigFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,4 +31,11 @@ if (-not (Test-Path -LiteralPath $setupPs1)) {
 }
 
 . $setupPs1
-ros2 run incremental_vo_ros2 incremental_vo_node @args
+
+$runArgs = @()
+if ($ConfigFile) {
+    $runArgs += "--config-file", $ConfigFile
+}
+$runArgs += $args
+
+ros2 run incremental_vo_ros2 incremental_vo_node @runArgs

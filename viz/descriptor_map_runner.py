@@ -81,7 +81,11 @@ def run_descriptor_landmark_pipeline(
             features_i=frame_cache[i],
             features_j=frame_cache[j],
         )
-        desc_map.integrate(tw, W0)
+        desc_map.integrate(
+            tw,
+            W0,
+            spatial_merge_radius_m=desc_cfg.spatial_merge_radius_m,
+        )
         if save_iter_viz:
             _write_snapshot(iter_root, ds, desc_map, step_idx, i, j)
 

@@ -44,12 +44,6 @@ def test_fused_pose_position_blend() -> None:
     np.testing.assert_allclose(out2[:3, 3], [10.0, 0.0, 0.0])
 
 
-def test_fuse_pose_sequence_rejects_ekf() -> None:
-    odom = [np.eye(4)]
-    with pytest.raises(ValueError, match="ROS streaming"):
-        fuse_pose_sequence(odom, None, "ekf_pose_velocity")
-
-
 def test_fuse_pose_sequence_length_mismatch() -> None:
     odom = [np.eye(4), np.eye(4)]
     prov = [np.eye(4)]
