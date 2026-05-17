@@ -35,24 +35,54 @@ def main() -> None:
     )
     p.add_argument("--i", type=int, default=0, help="First frame index (single-pair mode only)")
     p.add_argument("--j", type=int, default=1, help="Second frame index (single-pair mode only)")
+    p.add_argument(
+        "--no-geometry-stages",
+        action="store_true",
+        help="Skip triangulation / estimated depth / depth error under steps/geometry/",
+    )
+    p.add_argument(
+        "--reproj-outlier-px",
+        type=float,
+        default=3.0,
+        help="Reprojection threshold (px) for match rejection colouring (default 3)",
+    )
+    p.add_argument(
+        "--rejection-audit",
+        type=Path,
+        default=None,
+        help="Path for rejection_audit.jsonl (default: <run-dir>/rejection_audit.jsonl)",
+    )
     args = p.parse_args()
     ds = load_dataset(args.dataset_root)
+    include_geometry = not args.no_geometry_stages
+    audit_path = args.rejection_audit
     if args.sequence:
         export_sequence_consecutive_pairs(
             ds,
             args.run_dir,
             fuse_merge_px=args.fuse_merge_px,
             pair_lookback=args.pair_lookback,
+            include_geometry=include_geometry,
+            reproj_thresh_px=args.reproj_outlier_px,
+            rejection_audit_path=audit_path,
         )
-        ensure_sequence_outputs_exist(args.run_dir, len(ds.image_paths), pair_lookback=args.pair_lookback)
+        ensure_sequence_outputs_exist(
+            args.run_dir,
+            len(ds.image_paths),
+            pair_lookback=args.pair_lookback,
+            include_geometry=include_geometry,
+        )
     else:
         export_all_stages(
             ds,
             args.run_dir,
             i=args.i,
             j=args.j,
+            include_geometry=include_geometry,
+            reproj_thresh_px=args.reproj_outlier_px,
+            rejection_audit_path=audit_path,
         )
-        ensure_all_step_pngs_exist(args.run_dir)
+        ensure_all_step_pngs_exist(args.run_dir, include_geometry=include_geometry)
 
 
 if __name__ == "__main__":

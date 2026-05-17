@@ -445,6 +445,43 @@ def draw_keypoints(bgr: np.ndarray, pts: np.ndarray, color=(0, 255, 0)) -> np.nd
     return out
 
 
+def _match_canvas(img1: np.ndarray, img2: np.ndarray) -> tuple[np.ndarray, int]:
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
+    out = np.zeros((max(h1, h2), w1 + w2, 3), dtype=np.uint8)
+    out[:h1, :w1] = img1
+    out[:h2, w1 : w1 + w2] = img2
+    return out, w1
+
+
+def grayscale_to_bgr(gray: np.ndarray) -> np.ndarray:
+    if gray.ndim == 3:
+        return gray.copy()
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def canny_edges_bgr(gray: np.ndarray) -> np.ndarray:
+    g = gray if gray.ndim == 2 else cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+    med = float(np.median(g))
+    lo = int(max(0, 0.66 * med))
+    hi = int(min(255, 1.33 * med))
+    edges = cv2.Canny(g, lo, hi)
+    return cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+
+
+def draw_rich_keypoints(bgr: np.ndarray, keypoints: list) -> np.ndarray:
+    out = bgr.copy()
+    if keypoints:
+        cv2.drawKeypoints(
+            bgr,
+            keypoints,
+            out,
+            color=(0, 255, 0),
+            flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS,
+        )
+    return out
+
+
 def draw_matches(
     img1: np.ndarray,
     img2: np.ndarray,
@@ -452,17 +489,106 @@ def draw_matches(
     pts2: np.ndarray,
     color=(0, 255, 255),
 ) -> np.ndarray:
-    h1, w1 = img1.shape[:2]
-    h2, w2 = img2.shape[:2]
-    out = np.zeros((max(h1, h2), w1 + w2, 3), dtype=np.uint8)
-    out[:h1, :w1] = img1
-    out[:h2, w1 : w1 + w2] = img2
+    out, w1 = _match_canvas(img1, img2)
     for a, b in zip(pts1, pts2):
         p1 = (int(a[0]), int(a[1]))
         p2 = (int(b[0]) + w1, int(b[1]))
         cv2.line(out, p1, p2, color, 1, cv2.LINE_AA)
         cv2.circle(out, p1, 2, (0, 255, 0), -1, cv2.LINE_AA)
         cv2.circle(out, p2, 2, (0, 255, 0), -1, cv2.LINE_AA)
+    return out
+
+
+def draw_matches_masked(
+    img1: np.ndarray,
+    img2: np.ndarray,
+    pts1: np.ndarray,
+    pts2: np.ndarray,
+    mask: np.ndarray,
+    color=(0, 255, 255),
+) -> np.ndarray:
+    m = mask.reshape(-1).astype(bool)
+    if not np.any(m):
+        return _match_canvas(img1, img2)[0]
+    return draw_matches(img1, img2, pts1[m], pts2[m], color=color)
+
+
+# BGR colors for match rejection categories (thesis figures).
+MATCH_COLOR_EPIPOLAR = (0, 0, 255)
+MATCH_COLOR_CHEIRAL = (0, 128, 255)
+MATCH_COLOR_REPROJ = (255, 0, 255)
+MATCH_COLOR_INLIER = (0, 255, 0)
+
+
+def draw_classified_matches(
+    img1: np.ndarray,
+    img2: np.ndarray,
+    pts1: np.ndarray,
+    pts2: np.ndarray,
+    *,
+    epipolar: np.ndarray,
+    cheiral: np.ndarray,
+    reproj: np.ndarray,
+    inlier: np.ndarray,
+) -> np.ndarray:
+    out, w1 = _match_canvas(img1, img2)
+    categories = (
+        (epipolar, MATCH_COLOR_EPIPOLAR),
+        (cheiral, MATCH_COLOR_CHEIRAL),
+        (reproj, MATCH_COLOR_REPROJ),
+        (inlier, MATCH_COLOR_INLIER),
+    )
+    for mask, col in categories:
+        m = mask.reshape(-1).astype(bool)
+        for k, (a, b) in enumerate(zip(pts1, pts2)):
+            if not m[k]:
+                continue
+            p1 = (int(a[0]), int(a[1]))
+            p2 = (int(b[0]) + w1, int(b[1]))
+            cv2.line(out, p1, p2, col, 1, cv2.LINE_AA)
+            cv2.circle(out, p1, 2, col, -1, cv2.LINE_AA)
+            cv2.circle(out, p2, 2, col, -1, cv2.LINE_AA)
+    return out
+
+
+def _draw_epiline_on_image(canvas: np.ndarray, a: float, b: float, c: float, color, thickness: int = 1) -> None:
+    h, w = canvas.shape[:2]
+    x0, x1 = 0, w - 1
+    if abs(b) < 1e-6:
+        return
+    y0 = int(-(a * x0 + c) / b)
+    y1 = int(-(a * x1 + c) / b)
+    cv2.line(canvas, (x0, y0), (x1, y1), color, thickness, cv2.LINE_AA)
+
+
+def draw_epipolar_outliers_with_lines(
+    img1: np.ndarray,
+    img2: np.ndarray,
+    pts1: np.ndarray,
+    pts2: np.ndarray,
+    F: np.ndarray,
+    inlier_mask: np.ndarray,
+    *,
+    line_color=(255, 128, 0),
+    match_color=(0, 0, 255),
+) -> np.ndarray:
+    """Side-by-side: epipolar outliers only, each with its epiline on image 2."""
+    outlier = ~inlier_mask.reshape(-1).astype(bool)
+    if not np.any(outlier):
+        return _match_canvas(img1, img2)[0]
+    p1o = pts1[outlier]
+    p2o = pts2[outlier]
+    lines = cv2.computeCorrespondEpilines(p1o.reshape(-1, 1, 2), 1, F).reshape(-1, 3)
+    canvas2 = img2.copy()
+    for a, b, c in lines:
+        _draw_epiline_on_image(canvas2, float(a), float(b), float(c), line_color)
+    out, w1 = _match_canvas(img1, canvas2)
+    for a, b in zip(p1o, p2o):
+        pt1 = (int(a[0]), int(a[1]))
+        pt2 = (int(b[0]) + w1, int(b[1]))
+        cv2.line(out, pt1, pt2, match_color, 1, cv2.LINE_AA)
+        cv2.circle(out, pt1, 3, match_color, -1, cv2.LINE_AA)
+        cv2.circle(out, pt2, 3, match_color, -1, cv2.LINE_AA)
     return out
 
 

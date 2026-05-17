@@ -12,18 +12,26 @@ from pipeline.features import FrameFeatures, compute_frame_features_cache, detec
 from pipeline.geometry import essential_from_world_poses, invert_se3
 from pipeline.map import IncrementalMap, MapConfig, TwoViewResult
 from pipeline.fusion import FusedLandmarkMap, fused_world_points_homogeneous
+from viz.match_classification import (
+    append_rejection_audit,
+    audit_record,
+    classify_match_rejections,
+    write_pairs_all_rejection_types,
+)
 from viz.overlays import (
-    draw_epilines,
-    draw_inlier_outlier_matches,
-    draw_keypoints,
+    canny_edges_bgr,
+    draw_classified_matches,
+    draw_epipolar_outliers_with_lines,
     draw_matches,
+    draw_rich_keypoints,
     estimated_depth_visualization,
+    grayscale_to_bgr,
     project_points_topdown,
     project_world_points_to_camera_uv_z,
     render_trajectory_topdown,
     sparse_depth_error_heatmap,
 )
-from viz.recorder import STEP_ORDER, PipelineRecorder
+from viz.recorder import PipelineRecorder, ensure_step_pngs_exist as _ensure_step_pngs_exist
 
 
 def _undistort_if_needed(bgr: np.ndarray, ds: Dataset) -> tuple[np.ndarray, np.ndarray]:
@@ -57,69 +65,46 @@ def iter_sequence_pairs(n_frames: int, pair_lookback: int) -> list[tuple[int, in
     return out
 
 
-def export_single_pair_stages(
+def export_single_frame_stages(
+    ds: Dataset,
+    pair_run_dir: str | Path,
+    *,
+    frame_idx: int,
+    feat_cfg: FeatureConfig | None = None,
+    frame_features_cache: Sequence[FrameFeatures] | None = None,
+) -> None:
+    """Write ``steps/single/`` preprocessing figures for reference frame ``frame_idx``."""
+    feat_cfg = feat_cfg if feat_cfg is not None else ds.feature_config
+    rec = PipelineRecorder(pair_run_dir, subdir="single")
+
+    bgr = read_image_bgr(ds.image_paths[frame_idx])
+    und, gray = _undistort_if_needed(bgr, ds)
+
+    rec.write("original", und)
+    rec.write("grayscale", grayscale_to_bgr(gray))
+    rec.write("edges", canny_edges_bgr(gray))
+
+    if frame_features_cache is not None:
+        kpi = frame_features_cache[frame_idx].keypoints
+    else:
+        kpi, _ = detect_and_compute(gray, feat_cfg)
+    rec.write("descriptors", draw_rich_keypoints(und, kpi))
+
+
+def export_geometry_stages(
     ds: Dataset,
     pair_run_dir: str | Path,
     *,
     i: int,
     j: int,
-    feat_cfg: FeatureConfig | None = None,
-    reuse_two_view: TwoViewResult | None = None,
-    frame_features_cache: Sequence[FrameFeatures] | None = None,
+    tw: TwoViewResult,
+    und_i: np.ndarray,
 ) -> None:
-    """
-    Run the two-view pipeline for frames ``(i, j)`` and write every ``STEP_ORDER`` PNG under
-    ``pair_run_dir/steps/``.
-
-    If ``reuse_two_view`` is provided (must match ``(i, j)``), geometry from that result is
-    reused so sequence export can fuse landmarks without duplicate solving.
-
-    If ``frame_features_cache`` is set (length at least ``max(i, j) + 1``), keypoints for ``02_keypoints``
-    and matching inside ``add_frame_pair`` reuse precomputed descriptors instead of running
-    detection again per pair.
-    """
-    feat_cfg = feat_cfg if feat_cfg is not None else ds.feature_config
-    rec = PipelineRecorder(pair_run_dir)
-
-    bgr_i = read_image_bgr(ds.image_paths[i])
-    bgr_j = read_image_bgr(ds.image_paths[j])
-    rec.write("raw_input", np.hstack([bgr_i, bgr_j]))
-
-    und_i, g_i = _undistort_if_needed(bgr_i, ds)
-    und_j, g_j = _undistort_if_needed(bgr_j, ds)
-
+    """Write ``steps/geometry/`` triangulation and depth panels."""
+    rec = PipelineRecorder(pair_run_dir, subdir="geometry")
     K = ds.calibration.K
     Wi = ds.world_T_camera[i]
     Wj = ds.world_T_camera[j]
-
-    fi = frame_features_cache[i] if frame_features_cache is not None else None
-    fj = frame_features_cache[j] if frame_features_cache is not None else None
-
-    if reuse_two_view is not None:
-        assert reuse_two_view.frame_i == i and reuse_two_view.frame_j == j
-        tw = reuse_two_view
-    else:
-        map_cfg = MapConfig()
-        m = IncrementalMap(cfg=map_cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
-        tw = m.add_frame_pair(i, j, g_i, g_j, features_i=fi, features_j=fj)
-    pts1, pts2 = tw.pts1, tw.pts2
-
-    if fi is not None:
-        kpi = fi.keypoints
-    else:
-        kpi, _ = detect_and_compute(g_i, feat_cfg)
-    kp_img = draw_keypoints(und_i, np.float32([kp.pt for kp in kpi]))
-    rec.write("keypoints", kp_img)
-    rec.write("matches", draw_matches(und_i, und_j, pts1, pts2))
-
-    E_viz = tw.E
-    if E_viz is None:
-        E_viz = essential_from_world_poses(Wi, Wj, K)
-    F = fundamental_from_essential(np.asarray(E_viz, dtype=np.float64), K)
-    epi_mask = tw.inlier_mask
-
-    rec.write("epilines", draw_epilines(und_i, und_j, pts1, pts2, F, which="second"))
-    rec.write("inlier_outlier", draw_inlier_outlier_matches(und_i, und_j, pts1, pts2, epi_mask))
 
     Xw = tw.X_world_h[:3, :].T
     valid = tw.cheiral_mask & np.all(np.isfinite(Xw), axis=1)
@@ -176,6 +161,100 @@ def export_single_pair_stages(
     rec.write("depth_error", err_img)
 
 
+def export_single_pair_stages(
+    ds: Dataset,
+    pair_run_dir: str | Path,
+    *,
+    i: int,
+    j: int,
+    feat_cfg: FeatureConfig | None = None,
+    reuse_two_view: TwoViewResult | None = None,
+    frame_features_cache: Sequence[FrameFeatures] | None = None,
+    include_geometry: bool = True,
+    reproj_thresh_px: float = 3.0,
+    rejection_audit_path: str | Path | None = None,
+) -> dict:
+    """
+    Run the two-view pipeline for frames ``(i, j)`` and write illustration PNGs.
+
+    Returns the rejection audit record for this pair.
+    """
+    feat_cfg = feat_cfg if feat_cfg is not None else ds.feature_config
+    pair_root = Path(pair_run_dir)
+
+    export_single_frame_stages(
+        ds,
+        pair_root,
+        frame_idx=i,
+        feat_cfg=feat_cfg,
+        frame_features_cache=frame_features_cache,
+    )
+
+    bgr_i = read_image_bgr(ds.image_paths[i])
+    bgr_j = read_image_bgr(ds.image_paths[j])
+    und_i, g_i = _undistort_if_needed(bgr_i, ds)
+    und_j, g_j = _undistort_if_needed(bgr_j, ds)
+
+    K = ds.calibration.K
+    Wi = ds.world_T_camera[i]
+    Wj = ds.world_T_camera[j]
+
+    fi = frame_features_cache[i] if frame_features_cache is not None else None
+    fj = frame_features_cache[j] if frame_features_cache is not None else None
+
+    if reuse_two_view is not None:
+        assert reuse_two_view.frame_i == i and reuse_two_view.frame_j == j
+        tw = reuse_two_view
+    else:
+        map_cfg = MapConfig()
+        m = IncrementalMap(cfg=map_cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
+        tw = m.add_frame_pair(i, j, g_i, g_j, features_i=fi, features_j=fj)
+
+    pts1, pts2 = tw.pts1, tw.pts2
+    rec_pair = PipelineRecorder(pair_root, subdir="pair")
+
+    rec_pair.write("raw_input", np.hstack([und_i, und_j]))
+    rec_pair.write("matches", draw_matches(und_i, und_j, pts1, pts2))
+
+    E_viz = tw.E
+    if E_viz is None:
+        E_viz = essential_from_world_poses(Wi, Wj, K)
+    F = fundamental_from_essential(np.asarray(E_viz, dtype=np.float64), K)
+
+    rec_pair.write(
+        "epipolar_outliers_epilines",
+        draw_epipolar_outliers_with_lines(und_i, und_j, pts1, pts2, F, tw.inlier_mask),
+    )
+
+    cls = classify_match_rejections(tw, K, Wi, Wj, reproj_thresh_px=reproj_thresh_px)
+    rec_pair.write(
+        "match_classifications",
+        draw_classified_matches(
+            und_i,
+            und_j,
+            pts1,
+            pts2,
+            epipolar=cls.epipolar,
+            cheiral=cls.cheiral,
+            reproj=cls.reproj,
+            inlier=cls.inlier,
+        ),
+    )
+    rec_pair.write(
+        "inliers",
+        draw_matches(und_i, und_j, pts1[cls.inlier], pts2[cls.inlier]),
+    )
+
+    record = audit_record(i, j, cls)
+    if rejection_audit_path is not None:
+        append_rejection_audit(rejection_audit_path, record)
+
+    if include_geometry:
+        export_geometry_stages(ds, pair_root, i=i, j=j, tw=tw, und_i=und_i)
+
+    return record
+
+
 def export_all_stages(
     ds: Dataset,
     run_dir: str | Path,
@@ -184,16 +263,31 @@ def export_all_stages(
     j: int = 1,
     feat_cfg: FeatureConfig | None = None,
     frame_features_cache: Sequence[FrameFeatures] | None = None,
-) -> None:
-    """Single pair ``(i, j)`` into flat ``run_dir/steps/``."""
-    export_single_pair_stages(
+    include_geometry: bool = True,
+    reproj_thresh_px: float = 3.0,
+    rejection_audit_path: str | Path | None = None,
+) -> dict:
+    """Single pair ``(i, j)`` into ``run_dir/steps/{single,pair,geometry}/``."""
+    audit_path = rejection_audit_path if rejection_audit_path is not None else Path(run_dir) / "rejection_audit.jsonl"
+    if Path(audit_path).exists():
+        Path(audit_path).unlink()
+    record = export_single_pair_stages(
         ds,
         run_dir,
         i=i,
         j=j,
         feat_cfg=feat_cfg,
         frame_features_cache=frame_features_cache,
+        include_geometry=include_geometry,
+        reproj_thresh_px=reproj_thresh_px,
+        rejection_audit_path=audit_path,
     )
+    if record.get("has_all_rejection_types"):
+        write_pairs_all_rejection_types(
+            Path(run_dir) / "summary" / "pairs_all_rejection_types.json",
+            [record],
+        )
+    return record
 
 
 def export_sequence_consecutive_pairs(
@@ -203,6 +297,9 @@ def export_sequence_consecutive_pairs(
     feat_cfg: FeatureConfig | None = None,
     fuse_merge_px: float = 4.0,
     pair_lookback: int = 10,
+    include_geometry: bool = True,
+    reproj_thresh_px: float = 3.0,
+    rejection_audit_path: str | Path | None = None,
 ) -> list[tuple[int, int]]:
     """
     For each frame index ``j`` from ``1`` to ``n-1``, pair it with frames
@@ -212,16 +309,13 @@ def export_sequence_consecutive_pairs(
 
         run_dir/
           pairs/
-            iii_jjj/steps/*.png
+            iii_jjj/steps/{single,pair,geometry}/...
           summary/
             trajectory_topdown_full_sequence.png
             fused_landmarks_topdown.png
             fused_estimated_depth_ref000.png
-
-    A shared ``IncrementalMap`` solves each edge once; ``FusedLandmarkMap`` merges landmarks that
-    re-observe the same approximate pixel on a shared frame.
-
-    Using ``pair_lookback=1`` reproduces consecutive pairs only ``(k, k+1)``.
+            pairs_all_rejection_types.json
+          rejection_audit.jsonl
     """
     root = Path(run_dir)
     pairs_root = root / "pairs"
@@ -231,6 +325,10 @@ def export_sequence_consecutive_pairs(
     n = len(ds.image_paths)
     if n < 2:
         raise ValueError(f"need at least 2 images for sequence export, got {n}")
+
+    audit_path = rejection_audit_path if rejection_audit_path is not None else root / "rejection_audit.jsonl"
+    if Path(audit_path).exists():
+        Path(audit_path).unlink()
 
     fc = feat_cfg if feat_cfg is not None else ds.feature_config
     wl = max(1, int(pair_lookback))
@@ -253,6 +351,7 @@ def export_sequence_consecutive_pairs(
     fused = FusedLandmarkMap(merge_px=fuse_merge_px)
 
     pairs = iter_sequence_pairs(n, wl)
+    audit_records: list[dict] = []
     for i, j in pairs:
         tw = inc.add_frame_pair(
             i,
@@ -264,7 +363,7 @@ def export_sequence_consecutive_pairs(
         )
         fused.integrate_two_view_result(tw)
         pair_dir = pairs_root / f"{i:03d}_{j:03d}"
-        export_single_pair_stages(
+        record = export_single_pair_stages(
             ds,
             pair_dir,
             i=i,
@@ -272,7 +371,13 @@ def export_sequence_consecutive_pairs(
             feat_cfg=fc,
             reuse_two_view=tw,
             frame_features_cache=frame_cache,
+            include_geometry=include_geometry,
+            reproj_thresh_px=reproj_thresh_px,
+            rejection_audit_path=audit_path,
         )
+        audit_records.append(record)
+
+    write_pairs_all_rejection_types(summary_root / "pairs_all_rejection_types.json", audit_records)
 
     traj_full = render_trajectory_topdown(
         ds.world_T_camera,
@@ -324,12 +429,18 @@ def export_sequence_consecutive_pairs(
     return pairs
 
 
-def ensure_sequence_outputs_exist(run_dir: str | Path, n_frames: int, pair_lookback: int = 10) -> None:
-    """Check pair step PNGs, trajectory summary, and fused-landmark summaries."""
+def ensure_sequence_outputs_exist(
+    run_dir: str | Path,
+    n_frames: int,
+    pair_lookback: int = 10,
+    *,
+    include_geometry: bool = True,
+) -> None:
+    """Check pair step PNGs, trajectory summary, fused-landmark summaries, and audit file."""
     root = Path(run_dir)
     wl = max(1, int(pair_lookback))
     for i, j in iter_sequence_pairs(n_frames, wl):
-        ensure_all_step_pngs_exist(root / "pairs" / f"{i:03d}_{j:03d}")
+        ensure_step_pngs_exist(root / "pairs" / f"{i:03d}_{j:03d}", include_geometry=include_geometry)
     sf = root / "summary" / "trajectory_topdown_full_sequence.png"
     if not sf.is_file():
         raise FileNotFoundError(f"missing sequence summary: {sf}")
@@ -337,16 +448,18 @@ def ensure_sequence_outputs_exist(run_dir: str | Path, n_frames: int, pair_lookb
         p = root / "summary" / name
         if not p.is_file():
             raise FileNotFoundError(f"missing fused summary: {p}")
+    audit = root / "rejection_audit.jsonl"
+    if not audit.is_file():
+        raise FileNotFoundError(f"missing rejection audit: {audit}")
+    pairs_json = root / "summary" / "pairs_all_rejection_types.json"
+    if not pairs_json.is_file():
+        raise FileNotFoundError(f"missing pairs summary: {pairs_json}")
 
 
-def ensure_all_step_pngs_exist(run_dir: str | Path) -> list[Path]:
-    """Verify every documented stage file is present (after export_all_stages)."""
-    rec = PipelineRecorder(run_dir)
-    missing = []
-    for slug in STEP_ORDER:
-        p = rec.path_for(slug)
-        if not p.is_file():
-            missing.append(p)
-    if missing:
-        raise FileNotFoundError(f"missing step PNGs: {missing}")
-    return [rec.path_for(s) for s in STEP_ORDER]
+def ensure_step_pngs_exist(run_dir: str | Path, *, include_geometry: bool = True) -> list[Path]:
+    """Verify every documented stage file is present."""
+    return _ensure_step_pngs_exist(run_dir, include_geometry=include_geometry)
+
+
+def ensure_all_step_pngs_exist(run_dir: str | Path, *, include_geometry: bool = True) -> list[Path]:
+    return _ensure_step_pngs_exist(run_dir, include_geometry=include_geometry)

@@ -12,7 +12,7 @@
 
 3. **Two-view pipeline** (ORB/SIFT features → matching → RANSAC on the essential constraint → `recoverPose` → **vision** relative rotation and translation **direction** → scale translation to **odometry** \(\|\mathbf{t}\|\) from the fused trajectory between the two frames → triangulation in a **camera-0–centric** world frame: **`load_dataset`** left-multiplies every `world_T_camera` (and optional GT poses) by \(\mathrm{inv}(W_0)\) so the first pose is identity; pairwise relative motion is unchanged, so two-view scaling matches the original track). Intrinsics-distorted images may still be **undistorted internally** before detection; **`world_T_camera`** in memory is this canonical map frame (simulation or odometry “world” offsets appear only in raw logs, e.g. ROS **`position.json`** `position` fields).
 
-4. **Exports** — Step PNGs: raw mosaic, keypoints, matches, epilines, inlier/outlier matches, triangulation mosaic, sparse estimated depth on the reference frame, optional GT depth error. Depth colouring: **yellow = near → green → blue → pink = far** (no saturated red, to stay distinct from error highlights).
+4. **Exports** — Illustration PNGs under **`steps/single/`** (original, grayscale, Canny edges, rich keypoints) and **`steps/pair/`** (raw mosaic, all matches, epipolar outliers with epilines, multi-colour rejection panel, inliers only). Optional **`steps/geometry/`**: triangulation mosaic, sparse estimated depth, GT depth error. Match colours: **green** = full inlier, **red** = epipolar RANSAC outlier, **orange** = cheiral fail, **magenta** = high reprojection. **`rejection_audit.jsonl`** logs per-pair counts; **`summary/pairs_all_rejection_types.json`** lists pairs where every rejection type appears at least once. Depth colouring: **yellow = near → green → blue → pink = far** (no saturated red, to stay distinct from error highlights).
 
 5. **Sequence mode** — For each frame index \(j\), pairs **\((j-1,j),\,(j-2,j),\,\ldots\)** up to **`pair_lookback`** earlier frames **(default \(10\))**---a breaking change versus older versions that exported only consecutive pairs **`(k,k+1)`**. Use **`--pair-lookback 1`** to restore consecutive-only pairing. Outputs live under **`runs/.../pairs/iii_jjj/steps/`**; landmarks are **fused** across edges (**`fuse-merge-px`**); **`summary/`** contains full trajectory plus fused top-down and fused sparse depth on reference frame 0. **Descriptors are computed once per frame** (`compute_frame_features_cache`) and reused for every pair and for the keypoints figure—single-pair export still detects per call unless you pass a cache from Python.
 
@@ -138,10 +138,13 @@ dfm-descriptor-map path/to/dataset --run-dir runs/dmap --export-csv runs/dmap/la
 
 #### Single pair (default)
 
-Processes frames **`i`** and **`j`** only; writes PNGs under **`--run-dir/steps/`**.
+Processes frames **`i`** and **`j`**; writes **`steps/single/`**, **`steps/pair/`**, and (by default) **`steps/geometry/`**.
 
 ```bash
 dfm-export-steps path/to/dataset --run-dir runs/demo --i 0 --j 1
+
+# Illustration figures only (no triangulation / depth panels)
+dfm-export-steps path/to/dataset --run-dir runs/illus --i 0 --j 1 --no-geometry-stages
 ```
 
 #### Full sequence + fused landmarks
@@ -166,11 +169,14 @@ dfm-export-steps path/to/dataset --run-dir runs/demo --sequence --pair-lookback 
 | **`--fuse-merge-px`** | Pixel radius for merging landmarks on shared frames when `--sequence` (default `4`) |
 | **`--pair-lookback`** | With `--sequence`: pair each frame `j` with `j-1…j-W` (default **`10`**). Use **`1`** for consecutive-only. |
 | **`--i`**, **`--j`** | Frame indices for **single-pair** mode only (defaults `0`, `1`) |
+| **`--no-geometry-stages`** | Skip `steps/geometry/` (triangulation, estimated depth, depth error) |
+| **`--reproj-outlier-px`** | Reprojection threshold in pixels for magenta “reproj outlier” class (default `3`) |
+| **`--rejection-audit`** | Override path for `rejection_audit.jsonl` (default `<run-dir>/rejection_audit.jsonl`) |
 
 Outputs:
 
-- **Single pair:** `runs/<name>/steps/01_raw_input.png` … `08_depth_error.png` (fixed step order).
-- **Sequence:** `runs/<name>/pairs/iii_jjj/steps/…` for every generated pair, plus `summary/trajectory_topdown_full_sequence.png`, `fused_landmarks_topdown.png`, `fused_estimated_depth_ref000.png`.
+- **Single pair:** `runs/<name>/steps/single/01_original.png` … `04_descriptors.png`; `steps/pair/01_raw_input.png` … `05_inliers.png`; optional `steps/geometry/`; `rejection_audit.jsonl`.
+- **Sequence:** `runs/<name>/pairs/iii_jjj/steps/{single,pair,geometry}/…` for every generated pair, plus `summary/trajectory_topdown_full_sequence.png`, `fused_landmarks_topdown.png`, `fused_estimated_depth_ref000.png`, `pairs_all_rejection_types.json`, and `rejection_audit.jsonl` at the run root.
 
 ### Python API (automation / notebooks)
 
