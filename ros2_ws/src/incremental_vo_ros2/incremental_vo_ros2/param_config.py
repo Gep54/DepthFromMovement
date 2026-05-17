@@ -28,6 +28,7 @@ KNOWN_PARAMETERS = frozenset(
         "output_root",
         "max_image_buffer",
         "camera_info_topic",
+        "camera_info_qos_durability",
         "require_camera_info",
         "camera_fx",
         "camera_fy",

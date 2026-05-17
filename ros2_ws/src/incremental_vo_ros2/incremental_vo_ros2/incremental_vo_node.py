@@ -67,13 +67,26 @@ def _sensor_data_qos() -> QoSProfile:
     )
 
 
-def _camera_info_qos() -> QoSProfile:
+def _camera_info_qos(durability: DurabilityPolicy) -> QoSProfile:
     return QoSProfile(
         reliability=ReliabilityPolicy.RELIABLE,
-        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        durability=durability,
         history=HistoryPolicy.KEEP_LAST,
         depth=1,
     )
+
+
+def _parse_camera_info_qos_durability(raw: str, logger) -> DurabilityPolicy:
+    key = raw.strip().lower()
+    if key in ("transient_local", "transientlocal"):
+        return DurabilityPolicy.TRANSIENT_LOCAL
+    if key == "volatile":
+        return DurabilityPolicy.VOLATILE
+    logger.warning(
+        f"camera_info_qos_durability={raw!r} not in {{transient_local, volatile}}; "
+        "falling back to transient_local."
+    )
+    return DurabilityPolicy.TRANSIENT_LOCAL
 
 
 def _odom_qos() -> QoSProfile:
@@ -121,6 +134,7 @@ class IncrementalVoNode(Node):
         self.declare_parameter("output_root", ".")
         self.declare_parameter("max_image_buffer", 64)
         self.declare_parameter("camera_info_topic", "/uav1/stereo/left/camera_info")
+        self.declare_parameter("camera_info_qos_durability", "transient_local")
         self.declare_parameter("require_camera_info", True)
         # Deprecated when require_camera_info=true (intrinsics come from CameraInfo).
         self.declare_parameter("camera_fx", 600.0)
@@ -172,6 +186,14 @@ class IncrementalVoNode(Node):
         self._camera_info_topic = camera_info_topic
         self._require_camera_info = (
             self.get_parameter("require_camera_info").get_parameter_value().bool_value
+        )
+        camera_info_durability_raw = (
+            self.get_parameter("camera_info_qos_durability")
+            .get_parameter_value()
+            .string_value
+        )
+        camera_info_durability = _parse_camera_info_qos_durability(
+            camera_info_durability_raw, self.get_logger()
         )
         odom_main_topic = self.get_parameter("odom_main_topic").get_parameter_value().string_value
         subscribe_gt = self.get_parameter("subscribe_odom_gt").get_parameter_value().bool_value
@@ -345,7 +367,10 @@ class IncrementalVoNode(Node):
 
         self.create_subscription(Image, image_topic, self._on_image, _sensor_data_qos())
         self.create_subscription(
-            CameraInfo, camera_info_topic, self._on_camera_info, _camera_info_qos()
+            CameraInfo,
+            camera_info_topic,
+            self._on_camera_info,
+            _camera_info_qos(camera_info_durability),
         )
         self.create_subscription(Odometry, odom_main_topic, self._on_odom_main, _odom_qos())
         if self._provided_pose_topic:
@@ -372,6 +397,7 @@ class IncrementalVoNode(Node):
             f"(lazy preprocess on commit) | "
             f"pair_lookback={self._pair_lookback} | "
             f"image={image_topic!r} camera_info={camera_info_topic!r} "
+            f"camera_info_qos_durability={camera_info_durability_raw!r} "
             f"require_camera_info={self._require_camera_info} odom={odom_main_topic!r}"
             + (f" | odom_gt={odom_gt_topic!r}" if subscribe_gt else "")
             + (

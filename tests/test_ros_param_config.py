@@ -137,6 +137,19 @@ def test_apply_config_missing_file_raises(tmp_path: Path, monkeypatch: pytest.Mo
         apply_config_to_argv(["--config-file", str(tmp_path / "missing.env")])
 
 
+def test_apply_config_camera_info_qos_durability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "configuration.env"
+    cfg.write_text("camera_info_qos_durability=volatile\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("INCREMENTAL_VO_CONFIG", raising=False)
+
+    argv = apply_config_to_argv(["--config-file", str(cfg)])
+    merged = extract_cli_param_overrides(argv)
+    assert merged["camera_info_qos_durability"] == "volatile"
+
+
 def test_strip_config_file_not_in_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = tmp_path / "nope.env"
     cfg.write_text("keyframe_distance_m=0.1\n", encoding="utf-8")
