@@ -682,12 +682,21 @@ class IncrementalVoNode(Node):
             self._maybe_clear_buffer_for_fraction()
             self._maybe_log_image_throttle(msg)
             return
-        fused = self._fused_cam_to_world_and_pos()
-        if fused is None:
+        allow_fb = self._last_kf_pos is not None or not self._apply_tf_to_camera_pose
+        T, _pose_src = self._resolve_world_T_camera(
+            self._last_odom,
+            msg.header.stamp.sec,
+            msg.header.stamp.nanosec,
+            allow_odom_fallback=allow_fb,
+        )
+        if T is None:
             return
-        T, pos = fused
-        odom_T = self._world_T_camera_from_odom(
-            self._last_odom, allow_odom_fallback=self._last_kf_pos is not None
+        pos = T[:3, 3].copy()
+        odom_T, _ = self._resolve_world_T_camera(
+            self._last_odom,
+            msg.header.stamp.sec,
+            msg.header.stamp.nanosec,
+            allow_odom_fallback=allow_fb,
         )
         if odom_T is None:
             return
@@ -722,9 +731,22 @@ class IncrementalVoNode(Node):
             )
 
     def _tf_time_from_odom(self, msg: Odometry) -> Time:
-        if self._tf_use_latest or (msg.header.stamp.sec == 0 and msg.header.stamp.nanosec == 0):
+        return self._tf_time_from_stamp(msg.header.stamp.sec, msg.header.stamp.nanosec)
+
+    def _tf_time_from_stamp(self, sec: int, nsec: int) -> Time:
+        if self._tf_use_latest or (sec == 0 and nsec == 0):
             return Time()
-        return Time.from_msg(msg.header.stamp)
+        from builtin_interfaces.msg import Time as TimeMsg
+
+        return Time.from_msg(TimeMsg(sec=int(sec), nanosec=int(nsec)))
+
+    def _tf_lookup_stamps_from_time(
+        self, sec: int, nsec: int, *, allow_latest_fallback: bool
+    ) -> list[Time]:
+        stamps: list[Time] = [self._tf_time_from_stamp(sec, nsec)]
+        if allow_latest_fallback and not self._tf_use_latest:
+            stamps.append(Time())
+        return stamps
 
     def _maybe_warn_tf(self, message: str) -> None:
         now = time.monotonic()
@@ -735,12 +757,6 @@ class IncrementalVoNode(Node):
     def _odom_child_frame_id(self, msg: Odometry) -> str:
         child = (msg.child_frame_id or "").strip()
         return child
-
-    def _tf_lookup_stamps(self, msg: Odometry, *, allow_latest_fallback: bool) -> list[Time]:
-        stamps: list[Time] = [self._tf_time_from_odom(msg)]
-        if allow_latest_fallback and not self._tf_use_latest:
-            stamps.append(Time())
-        return stamps
 
     def _lookup_transform_to_matrix(
         self,
@@ -764,7 +780,9 @@ class IncrementalVoNode(Node):
         return None
 
     def _lookup_world_T_camera_direct(
-        self, msg: Odometry, *, allow_latest_fallback: bool = True
+        self,
+        msg: Odometry,
+        stamps: list[Time],
     ) -> np.ndarray | None:
         """Full chain on ``/tf``: ``odom.header.frame_id`` ← ``camera_frame`` (matches RViz)."""
         if not msg.header.frame_id:
@@ -772,11 +790,13 @@ class IncrementalVoNode(Node):
         return self._lookup_transform_to_matrix(
             msg.header.frame_id,
             self._camera_frame,
-            self._tf_lookup_stamps(msg, allow_latest_fallback=allow_latest_fallback),
+            stamps,
         )
 
     def _lookup_child_T_camera(
-        self, msg: Odometry, *, allow_latest_fallback: bool = True
+        self,
+        msg: Odometry,
+        stamps: list[Time],
     ) -> np.ndarray | None:
         """Extrinsic only: odom ``child_frame_id`` ← ``camera_frame`` (composed with odom pose)."""
         child = self._odom_child_frame_id(msg)
@@ -785,8 +805,45 @@ class IncrementalVoNode(Node):
         return self._lookup_transform_to_matrix(
             child,
             self._camera_frame,
-            self._tf_lookup_stamps(msg, allow_latest_fallback=allow_latest_fallback),
+            stamps,
         )
+
+    def _resolve_world_T_camera(
+        self,
+        msg: Odometry,
+        stamp_sec: int,
+        stamp_nsec: int,
+        *,
+        allow_odom_fallback: bool,
+    ) -> tuple[np.ndarray | None, str]:
+        """
+        Optical ``world_T_camera`` in ``msg.header.frame_id``.
+
+        Returns ``(T, source)`` with source one of:
+        ``odom_raw``, ``odom_child_is_camera``, ``tf_direct``, ``tf_compose``,
+        ``odom_body_fallback``, ``tf_missing``.
+        """
+        if not self._apply_tf_to_camera_pose or self._tf_buffer is None:
+            return odom_to_cam_to_world_T(msg), "odom_raw"
+        child = self._odom_child_frame_id(msg)
+        if child and child == self._camera_frame:
+            return odom_to_cam_to_world_T(msg), "odom_child_is_camera"
+        stamps = self._tf_lookup_stamps_from_time(
+            stamp_sec, stamp_nsec, allow_latest_fallback=True
+        )
+        T_direct = self._lookup_world_T_camera_direct(msg, stamps)
+        if T_direct is not None:
+            return T_direct, "tf_direct"
+        T_child_cam = self._lookup_child_T_camera(msg, stamps)
+        if T_child_cam is not None:
+            return odom_to_cam_to_world_T(msg) @ T_child_cam, "tf_compose"
+        if not allow_odom_fallback:
+            return None, "tf_missing"
+        self._maybe_warn_tf(
+            f"TF {msg.header.frame_id!r} <- {self._camera_frame!r} and "
+            f"{child!r} <- {self._camera_frame!r} failed; using odom child pose (body frame)."
+        )
+        return odom_to_cam_to_world_T(msg), "odom_body_fallback"
 
     def _maybe_log_waiting_for_tf(self, msg: Odometry) -> None:
         now = time.monotonic()
@@ -799,29 +856,51 @@ class IncrementalVoNode(Node):
             )
 
     def _can_resolve_camera_pose_from_odom(self, msg: Odometry) -> bool:
-        """True when extrinsic TF odom child → ``camera_frame`` is available."""
+        """True when TF can supply optical ``world_T_camera`` (full chain or extrinsic)."""
         if not self._apply_tf_to_camera_pose:
             return True
-        return self._lookup_child_T_camera(msg) is not None
+        stamps = self._tf_lookup_stamps_from_time(
+            msg.header.stamp.sec, msg.header.stamp.nanosec, allow_latest_fallback=True
+        )
+        return (
+            self._lookup_world_T_camera_direct(msg, stamps) is not None
+            or self._lookup_child_T_camera(msg, stamps) is not None
+        )
 
     def _world_T_camera_from_odom(
         self, msg: Odometry, *, allow_odom_fallback: bool = True
     ) -> np.ndarray | None:
-        """Metric camera→world: ``world_T_odom_child`` from odom × TF child→optical."""
-        if not self._apply_tf_to_camera_pose or self._tf_buffer is None:
-            return odom_to_cam_to_world_T(msg)
-        T_child_cam = self._lookup_child_T_camera(msg)
-        if T_child_cam is None:
-            if not allow_odom_fallback:
-                return None
-            child = self._odom_child_frame_id(msg) or "?"
-            self._maybe_warn_tf(
-                f"TF {child!r} <- {self._camera_frame!r} failed; "
-                "using odom pose without optical extrinsic."
+        T, _ = self._resolve_world_T_camera(
+            msg,
+            msg.header.stamp.sec,
+            msg.header.stamp.nanosec,
+            allow_odom_fallback=allow_odom_fallback,
+        )
+        return T
+
+    def _log_keyframe0_optical_axes(
+        self, idx: int, world_T_camera: np.ndarray, parent: str, pose_source: str
+    ) -> None:
+        if idx != 0:
+            return
+        R = np.asarray(world_T_camera, dtype=np.float64)[:3, :3]
+        z_ax = R[:, 2]
+        x_ax = R[:, 0]
+        self.get_logger().info(
+            f"Keyframe 0 optical axes in {parent!r} (pose_source={pose_source!r}): "
+            f"+Z(view)=({z_ax[0]:.3f},{z_ax[1]:.3f},{z_ax[2]:.3f}) "
+            f"+X(right)=({x_ax[0]:.3f},{x_ax[1]:.3f},{x_ax[2]:.3f})"
+        )
+        if pose_source == "odom_body_fallback":
+            self.get_logger().error(
+                "W0_raw is FCU/body (no optical TF): sparse map will stretch along world Z. "
+                "Fix TF or set apply_tf_to_camera_pose=false only if odom child is already optical."
             )
-            return odom_to_cam_to_world_T(msg)
-        T_world_child = odom_to_cam_to_world_T(msg)
-        return T_world_child @ T_child_cam
+        elif abs(float(z_ax[2])) > 0.85:
+            self.get_logger().warning(
+                "Optical +Z is nearly aligned with world Z (points up). "
+                "Expected mostly horizontal for forward flight — check camera_frame and /tf."
+            )
 
     def _camera_pose_debug_parent_frame(self) -> str:
         if self._camera_pose_debug_frame_id:
@@ -921,6 +1000,27 @@ class IncrementalVoNode(Node):
     def _commit_keyframe(self, bf: BufferedFrame, *, distance_trigger_m: float | None) -> None:
         from pipeline.geometry import canonicalize_world_T_camera_to_first
 
+        if self._last_odom is None:
+            return
+        allow_fb = not self._apply_tf_to_camera_pose
+        T_opt, pose_src = self._resolve_world_T_camera(
+            self._last_odom,
+            bf.stamp_sec,
+            bf.stamp_nsec,
+            allow_odom_fallback=allow_fb,
+        )
+        if T_opt is None:
+            self.get_logger().warning(
+                f"Keyframe skip: no optical TF at image stamp "
+                f"{bf.stamp_sec}.{bf.stamp_nsec:09d} (pose_source=tf_missing)."
+            )
+            return
+        bf.cam_to_world = T_opt
+        bf.odom_cam_to_world = T_opt
+        qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T_opt)
+        bf.qx, bf.qy, bf.qz, bf.qw = float(qx), float(qy), float(qz), float(qw)
+        bf.pos_odom = T_opt[:3, 3].copy()
+
         gray, k_eff = image_msg_to_gray_undistorted(bf.image_msg, self._calibration)
         if gray is None:
             self.get_logger().warn(
@@ -979,10 +1079,13 @@ class IncrementalVoNode(Node):
         }
         self._kf_records.append(rec)
         self._last_kf_pos = bf.pos_odom.copy()
+        parent_frame = self._camera_pose_debug_parent_frame() or "world"
+        self._log_keyframe0_optical_axes(idx, bf.cam_to_world, parent_frame, pose_src)
 
         saved = log_path or f"keyframe {idx} (no image export)"
         msg = (
             f"Keyframe {idx}: saved {saved} | pos=({bf.pos_odom[0]:.3f},{bf.pos_odom[1]:.3f},{bf.pos_odom[2]:.3f})"
+            f" | pose_source={pose_src!r}"
         )
         if distance_trigger_m is not None:
             msg += f" | odom spacing ~{distance_trigger_m:.3f} m (threshold {self._d})"

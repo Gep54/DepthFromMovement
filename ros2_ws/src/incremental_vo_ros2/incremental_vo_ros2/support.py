@@ -344,14 +344,14 @@ def save_sparse_map_eval_world_npz(
 
 
 def transform_points_world_T_camera(points_nx3: np.ndarray, world_T_camera: np.ndarray) -> np.ndarray:
-    """Map N×3 points in **camera** frame to **world**: ``X_w = R @ X_c + t`` (``world_T_camera`` = cam→world)."""
+    """Map N×3 points in **camera** frame to **world**: ``X_w = T @ X_c`` (``world_T_camera`` = cam→world)."""
     T = np.asarray(world_T_camera, dtype=np.float64)
-    R = T[:3, :3]
-    t = T[:3, 3]
     p = np.asarray(points_nx3, dtype=np.float64)
     if p.size == 0:
         return np.zeros((0, 3), dtype=np.float64)
-    return (p @ R.T) + t
+    ones = np.ones((p.shape[0], 1), dtype=np.float64)
+    ph = np.hstack([p, ones])
+    return (ph @ T.T)[:, :3]
 
 
 def save_sparse_map_npz(path: Path, points_xyz: np.ndarray) -> None:
