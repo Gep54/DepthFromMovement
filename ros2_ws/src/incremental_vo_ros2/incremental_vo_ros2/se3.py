@@ -55,6 +55,23 @@ def world_T_camera_from_odom_extrinsic(
     return W @ E
 
 
+def camera_z_arrow_endpoints_world(
+    world_T_camera: np.ndarray, length_m: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Tail and head of an arrow along camera **+Z** (viewing axis) expressed in world.
+
+    ``world_T_camera`` maps camera → world: ``X_w = R @ X_c + t``.
+    """
+    L = float(length_m)
+    if L <= 0.0:
+        raise ValueError("length_m must be positive")
+    T = np.asarray(world_T_camera, dtype=np.float64).reshape(4, 4)
+    tail = T[:3, 3].copy()
+    head = tail + L * T[:3, 2]
+    return tail, head
+
+
 def transform_points_world_T_camera(points_nx3: np.ndarray, world_T_camera: np.ndarray) -> np.ndarray:
     """Map N×3 points in camera frame to world: ``X_w = R @ X_c + t``."""
     T = np.asarray(world_T_camera, dtype=np.float64)

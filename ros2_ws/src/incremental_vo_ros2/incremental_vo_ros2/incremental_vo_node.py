@@ -32,7 +32,9 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from tf2_ros import Buffer, TransformException, TransformListener
+from visualization_msgs.msg import Marker
 
+from incremental_vo_ros2.keyframe_markers import make_camera_z_arrow_marker
 from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
 from incremental_vo_ros2.param_config import apply_config_to_argv
 from incremental_vo_ros2.support import (
@@ -152,6 +154,14 @@ class IncrementalVoNode(Node):
         self.declare_parameter("sparse_map_frame_id", "")
         self.declare_parameter("sparse_map_max_range_baseline_factor", 100.0)
         self.declare_parameter("save_run_on_shutdown", False)
+
+        # Keyframe debug markers (RViz ``visualization_msgs/Marker`` arrow = camera +Z).
+        self.declare_parameter("publish_keyframe_markers", True)
+        self.declare_parameter("keyframe_marker_topic", "keyframe_camera_z_arrows")
+        self.declare_parameter("keyframe_marker_length_m", 0.75)
+        self.declare_parameter("keyframe_marker_shaft_diameter_m", 0.04)
+        self.declare_parameter("keyframe_marker_head_diameter_m", 0.08)
+        self.declare_parameter("keyframe_marker_frame_id", "")
 
         # Offline dataset export (``load_dataset`` / ``dfm-export-steps``-ready layout).
         self.declare_parameter("export_offline_dataset", False)
@@ -308,6 +318,33 @@ class IncrementalVoNode(Node):
             .get_parameter_value()
             .double_value
         )
+        self._publish_keyframe_markers = (
+            self.get_parameter("publish_keyframe_markers").get_parameter_value().bool_value
+        )
+        self._keyframe_marker_topic = (
+            self.get_parameter("keyframe_marker_topic").get_parameter_value().string_value
+        )
+        self._keyframe_marker_length_m = max(
+            0.05,
+            float(self.get_parameter("keyframe_marker_length_m").get_parameter_value().double_value),
+        )
+        self._keyframe_marker_shaft_d = max(
+            1e-3,
+            float(
+                self.get_parameter("keyframe_marker_shaft_diameter_m")
+                .get_parameter_value()
+                .double_value
+            ),
+        )
+        self._keyframe_marker_head_d = max(
+            1e-3,
+            float(
+                self.get_parameter("keyframe_marker_head_diameter_m").get_parameter_value().double_value
+            ),
+        )
+        self._keyframe_marker_frame_id_override = (
+            self.get_parameter("keyframe_marker_frame_id").get_parameter_value().string_value.strip()
+        )
         self._last_consecutive_baseline_m: float | None = None
 
         self._pose_fusion = None
@@ -374,6 +411,12 @@ class IncrementalVoNode(Node):
                 PointCloud2, self._sparse_map_topic, _sparse_map_qos()
             )
             self.create_timer(self._sparse_map_period_s, self._on_sparse_map_timer)
+
+        self._keyframe_marker_pub = None
+        if self._publish_keyframe_markers:
+            self._keyframe_marker_pub = self.create_publisher(
+                Marker, self._keyframe_marker_topic, _sparse_map_qos()
+            )
 
         self.create_subscription(Image, image_topic, self._on_image, _sensor_data_qos())
         self.create_subscription(
@@ -445,6 +488,12 @@ class IncrementalVoNode(Node):
                 )
                 if self._publish_sparse_map
                 else " | sparse_map publishing disabled"
+            )
+            + (
+                f" | keyframe +Z arrows topic={self._keyframe_marker_topic!r} "
+                f"len={self._keyframe_marker_length_m}m"
+                if self._publish_keyframe_markers
+                else " | keyframe markers disabled"
             )
             + f" | save_run_on_shutdown={self._save_run_on_shutdown}"
             + (
@@ -828,6 +877,7 @@ class IncrementalVoNode(Node):
         if distance_trigger_m is not None:
             msg += f" | odom spacing ~{distance_trigger_m:.3f} m (threshold {self._d})"
         self.get_logger().info(msg)
+        self._publish_keyframe_camera_z_arrow(idx, bf)
 
         max_range_cam0: float | None = None
         if idx >= 1 and len(self._world_T_camera) > idx:
@@ -873,6 +923,39 @@ class IncrementalVoNode(Node):
                     )
                 except Exception as e:
                     self.get_logger().error(f"add_frame_pair failed for ({i}->{idx}): {e}")
+
+    def _metric_world_frame_id(self) -> str | None:
+        if self._keyframe_marker_frame_id_override:
+            return self._keyframe_marker_frame_id_override
+        if self._sparse_map_frame_id_override:
+            return self._sparse_map_frame_id_override
+        if self._last_odom is not None:
+            fid = self._last_odom.header.frame_id.strip()
+            if fid:
+                return fid
+        return None
+
+    def _publish_keyframe_camera_z_arrow(self, keyframe_index: int, bf: BufferedFrame) -> None:
+        pub = self._keyframe_marker_pub
+        if pub is None:
+            return
+        frame_id = self._metric_world_frame_id()
+        if not frame_id:
+            return
+        hdr = Header()
+        hdr.stamp.sec = int(bf.stamp_sec)
+        hdr.stamp.nanosec = int(bf.stamp_nsec)
+        hdr.frame_id = frame_id
+        marker = make_camera_z_arrow_marker(
+            frame_id=frame_id,
+            stamp=hdr.stamp,
+            keyframe_index=keyframe_index,
+            world_T_camera=bf.cam_to_world,
+            length_m=self._keyframe_marker_length_m,
+            shaft_diameter_m=self._keyframe_marker_shaft_d,
+            head_diameter_m=self._keyframe_marker_head_d,
+        )
+        pub.publish(marker)
 
     def _on_tf_timer(self) -> None:
         if self._tf_buffer is None or self._last_image_msg is None:
