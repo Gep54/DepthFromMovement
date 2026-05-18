@@ -54,7 +54,6 @@ KNOWN_PARAMETERS = frozenset(
         "export_offline_dataset",
         "offline_dataset_root",
         "offline_dataset_image_prefix",
-        "offline_dataset_pose_source",
         "base_frame",
         "camera_frame",
         "camera_axes_swap",
@@ -67,9 +66,6 @@ KNOWN_PARAMETERS = frozenset(
         "descriptor_merge_beta",
         "descriptor_max_match_distance",
         "descriptor_ratio_second_best",
-        "fusion_method",
-        "fusion_position_blend_weight",
-        "provided_pose_topic",
         "eval_world_T_camera0",
     }
 )

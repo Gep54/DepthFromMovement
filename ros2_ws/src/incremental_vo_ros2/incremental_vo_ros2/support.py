@@ -246,9 +246,8 @@ class BufferedFrame:
     stamp_sec: int
     stamp_nsec: int
     image_msg: Image
-    pos_odom: np.ndarray  # (3,) translation used for keyframe distance (fused when fusion active)
-    cam_to_world: np.ndarray  # 4×4 fused camera→world for triangulation
-    odom_cam_to_world: np.ndarray  # 4×4 raw odom_main camera→world at buffer time
+    pos_odom: np.ndarray  # (3,) translation used for keyframe distance (from odometry + optional TF)
+    cam_to_world: np.ndarray  # 4×4 camera→world for triangulation / export
     qx: float
     qy: float
     qz: float
@@ -264,8 +263,6 @@ def save_keyframe_manifest(
     odom_header_frame: str,
     records: list[dict],
     pair_lookback: int | None = None,
-    fusion_method: str | None = None,
-    provided_pose_topic: str | None = None,
     feature_method: str | None = None,
     feature_n_features: int | None = None,
     descriptor_merge_beta: float | None = None,
@@ -284,10 +281,6 @@ def save_keyframe_manifest(
     }
     if pair_lookback is not None:
         payload["pair_lookback"] = int(pair_lookback)
-    if fusion_method is not None:
-        payload["fusion_method"] = fusion_method
-    if provided_pose_topic is not None:
-        payload["provided_pose_topic"] = provided_pose_topic
     if feature_method is not None:
         payload["feature_method"] = feature_method
     if feature_n_features is not None:

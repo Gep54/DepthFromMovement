@@ -111,13 +111,13 @@ def test_apply_config_preserves_use_sim_time(tmp_path: Path, monkeypatch: pytest
 
 def test_apply_config_default_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = tmp_path / "configuration.env"
-    cfg.write_text("fusion_method=odom_only\n", encoding="utf-8")
+    cfg.write_text("pair_lookback=7\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("INCREMENTAL_VO_CONFIG", raising=False)
 
     argv = apply_config_to_argv([])
     merged = extract_cli_param_overrides(argv)
-    assert merged["fusion_method"] == "odom_only"
+    assert merged["pair_lookback"] == "7"
 
 
 def test_apply_config_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,7 +143,7 @@ def test_apply_config_skips_empty_values(tmp_path: Path, monkeypatch: pytest.Mon
     cfg.write_text(
         "sparse_map_frame_id=\n"
         "keyframe_distance_m=0.42\n"
-        "provided_pose_topic=\n",
+        "offline_dataset_root=\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -152,7 +152,7 @@ def test_apply_config_skips_empty_values(tmp_path: Path, monkeypatch: pytest.Mon
     argv = apply_config_to_argv(["--config-file", str(cfg)])
     merged = extract_cli_param_overrides(argv)
     assert "sparse_map_frame_id" not in merged
-    assert "provided_pose_topic" not in merged
+    assert "offline_dataset_root" not in merged
     assert merged["keyframe_distance_m"] == "0.42"
     for tok in argv:
         if ":=" in tok:

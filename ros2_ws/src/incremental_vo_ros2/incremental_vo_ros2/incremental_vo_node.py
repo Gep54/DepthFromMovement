@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""ROS 2 node: live sparse 3D map from monocular keyframes + metric pose fusion + two-view triangulation.
+"""ROS 2 node: live sparse 3D map from monocular keyframes + odometry + two-view triangulation.
 
-Odometry ``pose`` updates the primary metric track. An optional ``geometry_msgs/PoseStamped`` topic
-supplies a second ``world_T_camera`` estimate (e.g. from optical flow upstream); :mod:`pipeline.metric_fusion`
-combines tracks before ``IncrementalMap`` consumes poses. If your camera is offset from ``child_frame_id``,
-fuse TF into ``cam_to_world`` before this node.
+Odometry supplies the metric ``world_T_camera`` track (optionally composed with TF to the optical frame).
 """
 
 from __future__ import annotations
@@ -48,7 +45,6 @@ from incremental_vo_ros2.support import (
     image_msg_to_gray_undistorted,
     max_sparse_range_m,
     odom_to_cam_to_world_T,
-    pose_stamped_to_world_T_camera,
     save_keyframe_manifest,
     save_sparse_map_eval_world_npz,
     save_sparse_map_npz,
@@ -133,7 +129,7 @@ def _tf_static_live_qos() -> QoSProfile:
 
 
 class IncrementalVoNode(Node):
-    """Distance-based keyframes, pluggable metric pose fusion, two-view sparse triangulation."""
+    """Distance-based keyframes, odometry-grounded poses, two-view sparse triangulation."""
 
     def __init__(self) -> None:
         super().__init__("incremental_vo_node")
@@ -179,9 +175,8 @@ class IncrementalVoNode(Node):
         self.declare_parameter("export_offline_dataset", False)
         self.declare_parameter("offline_dataset_root", "")
         self.declare_parameter("offline_dataset_image_prefix", "frame")
-        self.declare_parameter("offline_dataset_pose_source", "odom")
 
-        # RViz debug: fused camera pose/orientation (PoseStamped + optional TF).
+        # RViz debug: camera pose/orientation (PoseStamped + optional TF).
         self.declare_parameter("publish_camera_pose_debug", True)
         self.declare_parameter("camera_pose_debug_topic", "camera_pose_debug")
         self.declare_parameter("camera_pose_debug_frame_id", "")
@@ -214,10 +209,6 @@ class IncrementalVoNode(Node):
         self.declare_parameter("descriptor_max_match_distance", -1.0)
         self.declare_parameter("descriptor_ratio_second_best", -1.0)
 
-        # Metric pose fusion (odometry vs optional external ``world_T_camera``).
-        self.declare_parameter("fusion_method", "position_blend")
-        self.declare_parameter("fusion_position_blend_weight", 0.5)
-        self.declare_parameter("provided_pose_topic", "")
         self.declare_parameter("eval_world_T_camera0", [0.0] * 16)
 
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
@@ -275,15 +266,6 @@ class IncrementalVoNode(Node):
         self._image_log_interval_s = 1.0 / log_hz if log_hz > 0.0 else math.inf
         self._last_image_log_time = self.get_clock().now()
 
-        self._fusion_method_str = (
-            self.get_parameter("fusion_method").get_parameter_value().string_value.strip()
-        )
-        self._fusion_position_blend_w = float(
-            self.get_parameter("fusion_position_blend_weight").get_parameter_value().double_value
-        )
-        self._provided_pose_topic = (
-            self.get_parameter("provided_pose_topic").get_parameter_value().string_value.strip()
-        )
         eval_param = self.get_parameter("eval_world_T_camera0").value
         eval_seq = eval_param if isinstance(eval_param, (list, tuple)) else []
         self._eval_world_T_cam0 = eval_world_T_camera0_from_parameter(eval_seq)
@@ -334,18 +316,6 @@ class IncrementalVoNode(Node):
             .string_value.strip()
             or "frame"
         )
-        pose_src = (
-            self.get_parameter("offline_dataset_pose_source")
-            .get_parameter_value()
-            .string_value.strip()
-            .lower()
-        )
-        if pose_src not in ("odom", "fused"):
-            self.get_logger().warning(
-                f"offline_dataset_pose_source={pose_src!r} not in {{odom,fused}}; using odom."
-            )
-            pose_src = "odom"
-        self._offline_pose_source = pose_src
         self._sparse_map_range_factor = float(
             self.get_parameter("sparse_map_max_range_baseline_factor")
             .get_parameter_value()
@@ -387,23 +357,6 @@ class IncrementalVoNode(Node):
         self._last_tf_warn_time = 0.0
         self._last_tf_wait_log_time = 0.0
         self._last_consecutive_baseline_m: float | None = None
-
-        self._pose_fusion = None
-        if repo is not None:
-            try:
-                from pipeline.metric_fusion import create_metric_pose_fusion
-
-                self._pose_fusion = create_metric_pose_fusion(
-                    self._fusion_method_str,
-                    position_blend_weight=self._fusion_position_blend_w,
-                )
-            except ValueError as e:
-                self.get_logger().warning(f"{e}; falling back to fusion_method=odom_only.")
-                self._fusion_method_str = "odom_only"
-                self._pose_fusion = create_metric_pose_fusion(
-                    "odom_only",
-                    position_blend_weight=self._fusion_position_blend_w,
-                )
 
         stamp_tag = time.strftime("%Y%m%d_%H%M%S")
         self._run_dir = (out_root.resolve() / "ros2_runs" / f"run_{stamp_tag}").resolve()
@@ -481,13 +434,6 @@ class IncrementalVoNode(Node):
             _camera_info_qos(camera_info_durability),
         )
         self.create_subscription(Odometry, odom_main_topic, self._on_odom_main, _odom_qos())
-        if self._provided_pose_topic:
-            self.create_subscription(
-                PoseStamped,
-                self._provided_pose_topic,
-                self._on_provided_pose,
-                _odom_qos(),
-            )
         self._last_odom_gt: Odometry | None = None
         if subscribe_gt:
             self.create_subscription(Odometry, odom_gt_topic, self._on_odom_gt, _odom_qos())
@@ -508,14 +454,6 @@ class IncrementalVoNode(Node):
             f"camera_info_qos_durability={camera_info_durability_raw!r} "
             f"require_camera_info={self._require_camera_info} odom={odom_main_topic!r}"
             + (f" | odom_gt={odom_gt_topic!r}" if subscribe_gt else "")
-            + (
-                f" | fusion={self._fusion_method_str!r}"
-                + (
-                    f" provided_pose={self._provided_pose_topic!r}"
-                    if self._provided_pose_topic
-                    else ""
-                )
-            )
             + (
                 f" | TF periodic debug {self._base_frame!r}<-{self._camera_frame!r} every {tf_period}s"
                 if tf_period > 0.0
@@ -540,7 +478,7 @@ class IncrementalVoNode(Node):
             + f" | save_run_on_shutdown={self._save_run_on_shutdown}"
             + (
                 f" | offline_dataset={self._offline_dataset_dir!s} "
-                f"pose_source={self._offline_pose_source!r} prefix={self._offline_image_prefix!r}"
+                f"prefix={self._offline_image_prefix!r}"
                 if self._offline_dataset_dir is not None
                 else " | offline_dataset export disabled"
             )
@@ -683,10 +621,7 @@ class IncrementalVoNode(Node):
             f"ratio_second_best={desc_cfg.ratio_second_best}"
         )
 
-    def _fused_cam_to_world_and_pos(self) -> tuple[np.ndarray, np.ndarray] | None:
-        if self._pose_fusion is not None:
-            T = self._pose_fusion.fused_world_T_camera()
-            return T, T[:3, 3].copy()
+    def _cam_to_world_and_pos(self) -> tuple[np.ndarray, np.ndarray] | None:
         assert self._last_odom is not None
         allow_fb = self._last_kf_pos is not None
         T = self._world_T_camera_from_odom(self._last_odom, allow_odom_fallback=allow_fb)
@@ -695,10 +630,10 @@ class IncrementalVoNode(Node):
         return T, T[:3, 3].copy()
 
     def _current_metric_position(self) -> np.ndarray | None:
-        fused = self._fused_cam_to_world_and_pos()
-        if fused is None:
+        resolved = self._cam_to_world_and_pos()
+        if resolved is None:
             return None
-        return fused[1]
+        return resolved[1]
 
     def _travel_fraction_since_last_kf(self) -> float | None:
         """``‖pos − last_kf‖ / keyframe_distance_m``; ``None`` if no keyframe committed yet."""
@@ -747,14 +682,6 @@ class IncrementalVoNode(Node):
         if T is None:
             return
         pos = T[:3, 3].copy()
-        odom_T, _ = self._resolve_world_T_camera(
-            self._last_odom,
-            msg.header.stamp.sec,
-            msg.header.stamp.nanosec,
-            allow_odom_fallback=allow_fb,
-        )
-        if odom_T is None:
-            return
         qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T)
         bf = BufferedFrame(
             stamp_sec=msg.header.stamp.sec,
@@ -762,7 +689,6 @@ class IncrementalVoNode(Node):
             image_msg=copy_image_msg(msg),
             pos_odom=pos,
             cam_to_world=T,
-            odom_cam_to_world=odom_T,
             qx=float(qx),
             qy=float(qy),
             qz=float(qz),
@@ -1136,10 +1062,10 @@ class IncrementalVoNode(Node):
         parent = self._camera_pose_debug_parent_frame()
         if not parent:
             return
-        fused = self._fused_cam_to_world_and_pos()
-        if fused is None:
+        resolved = self._cam_to_world_and_pos()
+        if resolved is None:
             return
-        T, _ = fused
+        T, _ = resolved
         hdr = Header()
         hdr.stamp = stamp
         hdr.frame_id = parent
@@ -1158,30 +1084,9 @@ class IncrementalVoNode(Node):
 
     def _on_odom_main(self, msg: Odometry) -> None:
         self._last_odom = msg
-        if self._pose_fusion is not None:
-            allow_fb = self._last_kf_pos is not None
-            T = self._world_T_camera_from_odom(msg, allow_odom_fallback=allow_fb)
-            if T is not None:
-                self._pose_fusion.push_odom_world_T_camera(
-                    T, (msg.header.stamp.sec, msg.header.stamp.nanosec)
-                )
-            elif self._last_kf_pos is None:
-                self._maybe_log_waiting_for_tf(msg)
         self._publish_camera_pose_debug(msg.header.stamp)
         self._maybe_clear_buffer_for_fraction()
         self._try_keyframe_selection()
-
-    def _on_provided_pose(self, msg: PoseStamped) -> None:
-        if self._pose_fusion is None:
-            return
-        T = pose_stamped_to_world_T_camera(msg)
-        self._pose_fusion.push_provided_world_T_camera(
-            T, (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        )
-        stamp = msg.header.stamp
-        if self._last_odom is not None:
-            stamp = self._last_odom.header.stamp
-        self._publish_camera_pose_debug(stamp)
 
     def _on_odom_gt(self, msg: Odometry) -> None:
         self._last_odom_gt = msg
@@ -1237,7 +1142,6 @@ class IncrementalVoNode(Node):
             )
             return
         bf.cam_to_world = T_opt
-        bf.odom_cam_to_world = T_opt
         qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T_opt)
         bf.qx, bf.qy, bf.qz, bf.qw = float(qx), float(qy), float(qz), float(qw)
         bf.pos_odom = T_opt[:3, 3].copy()
@@ -1261,13 +1165,8 @@ class IncrementalVoNode(Node):
             stem = offline_dataset_image_basename(self._offline_image_prefix, idx)
             offline_path = self._offline_dataset_dir / "images" / stem
             cv2.imwrite(str(offline_path), gray)
-            T_export = (
-                bf.odom_cam_to_world
-                if self._offline_pose_source == "odom"
-                else bf.cam_to_world
-            )
             self._offline_motion_frames.append(
-                {"index": idx, "filename": stem, "T": T_export.tolist()}
+                {"index": idx, "filename": stem, "T": bf.cam_to_world.tolist()}
             )
             self._write_offline_motion_json()
             log_path = f"images/{stem}"
@@ -1479,8 +1378,7 @@ class IncrementalVoNode(Node):
         self._write_offline_motion_json()
         n = len(self._offline_motion_frames)
         self.get_logger().info(
-            f"Offline dataset: {self._offline_dataset_dir} ({n} frames, motion pose_source="
-            f"{self._offline_pose_source!r})"
+            f"Offline dataset: {self._offline_dataset_dir} ({n} frames)"
         )
 
     def persist_run(self) -> None:
@@ -1506,8 +1404,6 @@ class IncrementalVoNode(Node):
             odom_child_frame=child,
             odom_header_frame=header_frame,
             records=self._kf_records,
-            fusion_method=self._fusion_method_str,
-            provided_pose_topic=self._provided_pose_topic or None,
             feature_method=self._feature_method,
             feature_n_features=self._feature_n,
             descriptor_merge_beta=(
