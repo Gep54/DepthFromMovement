@@ -32,6 +32,7 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
+from visualization_msgs.msg import Marker
 
 from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
 from incremental_vo_ros2.param_config import apply_config_to_argv
@@ -52,6 +53,7 @@ from incremental_vo_ros2.support import (
     save_sparse_map_npz,
     should_buffer_image,
     transform_points_world_T_camera,
+    transform_stamped_to_world_T,
     effective_K_from_calibration,
     world_T_camera_to_pose_stamped,
     world_T_camera_to_quaternion_xyzw,
@@ -165,6 +167,13 @@ class IncrementalVoNode(Node):
         self.declare_parameter("camera_pose_debug_frame_id", "")
         self.declare_parameter("camera_pose_debug_child_frame_id", "dfm/camera_optical")
         self.declare_parameter("publish_camera_pose_tf", True)
+
+        # RViz: camera +Z line per keyframe; compose odom child → optical via TF.
+        self.declare_parameter("publish_keyframe_markers", False)
+        self.declare_parameter("keyframe_marker_topic", "keyframe_camera_z_arrows")
+        self.declare_parameter("keyframe_marker_length_m", 0.5)
+        self.declare_parameter("keyframe_marker_frame_id", "")
+        self.declare_parameter("apply_tf_to_camera_pose", False)
 
         # Optional TF debug (off by default for rosbag-focused runs).
         self.declare_parameter("base_frame", "uav1/base_link")
@@ -307,7 +316,7 @@ class IncrementalVoNode(Node):
             .get_parameter_value()
             .double_value
         )
-        self._publish_camera_pose_debug = (
+        self._camera_pose_debug_enabled = (
             self.get_parameter("publish_camera_pose_debug").get_parameter_value().bool_value
         )
         self._camera_pose_debug_topic = (
@@ -325,6 +334,22 @@ class IncrementalVoNode(Node):
         self._publish_camera_pose_tf = (
             self.get_parameter("publish_camera_pose_tf").get_parameter_value().bool_value
         )
+        self._publish_keyframe_markers = (
+            self.get_parameter("publish_keyframe_markers").get_parameter_value().bool_value
+        )
+        self._keyframe_marker_topic = (
+            self.get_parameter("keyframe_marker_topic").get_parameter_value().string_value
+        )
+        self._keyframe_marker_length_m = float(
+            self.get_parameter("keyframe_marker_length_m").get_parameter_value().double_value
+        )
+        self._keyframe_marker_frame_id = (
+            self.get_parameter("keyframe_marker_frame_id").get_parameter_value().string_value.strip()
+        )
+        self._apply_tf_to_camera_pose = (
+            self.get_parameter("apply_tf_to_camera_pose").get_parameter_value().bool_value
+        )
+        self._last_tf_warn_time = 0.0
         self._last_consecutive_baseline_m: float | None = None
 
         self._pose_fusion = None
@@ -383,6 +408,7 @@ class IncrementalVoNode(Node):
         self._sparse_map_pub = None
         self._camera_pose_debug_pub = None
         self._camera_pose_tf_broadcaster: TransformBroadcaster | None = None
+        self._keyframe_marker_pub = None
         self._sparse_map_fields = [
             PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
@@ -393,12 +419,16 @@ class IncrementalVoNode(Node):
                 PointCloud2, self._sparse_map_topic, _sparse_map_qos()
             )
             self.create_timer(self._sparse_map_period_s, self._on_sparse_map_timer)
-        if self._publish_camera_pose_debug:
+        if self._camera_pose_debug_enabled:
             self._camera_pose_debug_pub = self.create_publisher(
                 PoseStamped, self._camera_pose_debug_topic, _odom_qos()
             )
             if self._publish_camera_pose_tf:
                 self._camera_pose_tf_broadcaster = TransformBroadcaster(self)
+        if self._publish_keyframe_markers:
+            self._keyframe_marker_pub = self.create_publisher(
+                Marker, self._keyframe_marker_topic, _odom_qos()
+            )
 
         self.create_subscription(Image, image_topic, self._on_image, _sensor_data_qos())
         self.create_subscription(
@@ -419,12 +449,16 @@ class IncrementalVoNode(Node):
         if subscribe_gt:
             self.create_subscription(Odometry, odom_gt_topic, self._on_odom_gt, _odom_qos())
 
-        # Only spin a TF listener when periodic lookups are enabled (avoids /tf subscription and
-        # TF_OLD_DATA noise during rosbag playback when extrinsics are not needed).
-        if tf_period > 0.0:
+        # TF listener: required for ``apply_tf_to_camera_pose`` or periodic debug logging.
+        if tf_period > 0.0 or self._apply_tf_to_camera_pose:
             self._tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
             self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
-            self.create_timer(tf_period, self._on_tf_timer)
+            if tf_period > 0.0:
+                self.create_timer(tf_period, self._on_tf_timer)
+        if self._apply_tf_to_camera_pose and self._tf_buffer is None:
+            self.get_logger().warning(
+                "apply_tf_to_camera_pose=true but TF listener failed to start; using odom pose as-is."
+            )
 
         self.get_logger().info(
             f"Run directory: {self._run_dir} | keyframe_distance_m={self._d} | "
@@ -481,8 +515,20 @@ class IncrementalVoNode(Node):
                 )
                 + f" child_tf={self._camera_pose_debug_child_frame_id!r}"
                 + (" + TF" if self._publish_camera_pose_tf else " pose only")
-                if self._publish_camera_pose_debug
+                if self._camera_pose_debug_enabled
                 else " | camera_pose_debug disabled"
+            )
+            + (
+                f" | apply_tf_to_camera_pose={self._apply_tf_to_camera_pose}"
+                f" camera_frame={self._camera_frame!r}"
+                if self._apply_tf_to_camera_pose
+                else ""
+            )
+            + (
+                f" | keyframe_markers topic={self._keyframe_marker_topic!r} "
+                f"length_m={self._keyframe_marker_length_m}"
+                if self._publish_keyframe_markers
+                else ""
             )
         )
 
@@ -586,8 +632,8 @@ class IncrementalVoNode(Node):
             T = self._pose_fusion.fused_world_T_camera()
             return T, T[:3, 3].copy()
         assert self._last_odom is not None
-        T = odom_to_cam_to_world_T(self._last_odom)
-        return T, odom_position_xyz(self._last_odom)
+        T = self._world_T_camera_from_odom(self._last_odom)
+        return T, T[:3, 3].copy()
 
     def _current_metric_position(self) -> np.ndarray:
         if self._pose_fusion is not None:
@@ -625,7 +671,7 @@ class IncrementalVoNode(Node):
             self._maybe_log_image_throttle(msg)
             return
         T, pos = self._fused_cam_to_world_and_pos()
-        odom_T = odom_to_cam_to_world_T(self._last_odom)
+        odom_T = self._world_T_camera_from_odom(self._last_odom)
         qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T)
         bf = BufferedFrame(
             stamp_sec=msg.header.stamp.sec,
@@ -656,6 +702,38 @@ class IncrementalVoNode(Node):
                 f"Image {msg.width}x{msg.height} encoding={msg.encoding} frame={msg.header.frame_id!r}"
             )
 
+    def _tf_time_from_odom(self, msg: Odometry) -> Time:
+        if self._tf_use_latest or (msg.header.stamp.sec == 0 and msg.header.stamp.nanosec == 0):
+            return Time()
+        return Time.from_msg(msg.header.stamp)
+
+    def _maybe_warn_tf(self, message: str) -> None:
+        now = time.monotonic()
+        if now - self._last_tf_warn_time >= 5.0:
+            self._last_tf_warn_time = now
+            self.get_logger().warning(message)
+
+    def _world_T_camera_from_odom(self, msg: Odometry) -> np.ndarray:
+        """Metric camera→world; optionally compose odom child frame with TF to ``camera_frame``."""
+        if not self._apply_tf_to_camera_pose or self._tf_buffer is None:
+            return odom_to_cam_to_world_T(msg)
+        if not msg.header.frame_id:
+            return odom_to_cam_to_world_T(msg)
+        try:
+            t = self._tf_buffer.lookup_transform(
+                msg.header.frame_id,
+                self._camera_frame,
+                self._tf_time_from_odom(msg),
+                timeout=Duration(seconds=0.25),
+            )
+            return transform_stamped_to_world_T(t)
+        except TransformException as e:
+            self._maybe_warn_tf(
+                f"TF {msg.header.frame_id!r} <- {self._camera_frame!r} failed ({e}); "
+                "using odom pose without extrinsic."
+            )
+            return odom_to_cam_to_world_T(msg)
+
     def _camera_pose_debug_parent_frame(self) -> str:
         if self._camera_pose_debug_frame_id:
             return self._camera_pose_debug_frame_id
@@ -664,7 +742,7 @@ class IncrementalVoNode(Node):
         return ""
 
     def _publish_camera_pose_debug(self, stamp) -> None:
-        if not self._publish_camera_pose_debug or self._last_odom is None:
+        if not self._camera_pose_debug_enabled or self._last_odom is None:
             return
         parent = self._camera_pose_debug_parent_frame()
         if not parent:
@@ -689,7 +767,7 @@ class IncrementalVoNode(Node):
     def _on_odom_main(self, msg: Odometry) -> None:
         self._last_odom = msg
         if self._pose_fusion is not None:
-            T = odom_to_cam_to_world_T(msg)
+            T = self._world_T_camera_from_odom(msg)
             self._pose_fusion.push_odom_world_T_camera(
                 T, (msg.header.stamp.sec, msg.header.stamp.nanosec)
             )
@@ -808,6 +886,7 @@ class IncrementalVoNode(Node):
         if distance_trigger_m is not None:
             msg += f" | odom spacing ~{distance_trigger_m:.3f} m (threshold {self._d})"
         self.get_logger().info(msg)
+        self._publish_keyframe_z_marker(idx, bf.cam_to_world, bf.stamp_sec, bf.stamp_nsec)
 
         max_range_cam0: float | None = None
         if idx >= 1 and len(self._world_T_camera) > idx:
@@ -853,6 +932,42 @@ class IncrementalVoNode(Node):
                     )
                 except Exception as e:
                     self.get_logger().error(f"add_frame_pair failed for ({i}->{idx}): {e}")
+
+    def _publish_keyframe_z_marker(
+        self,
+        idx: int,
+        world_T_camera: np.ndarray,
+        stamp_sec: int,
+        stamp_nsec: int,
+    ) -> None:
+        pub = self._keyframe_marker_pub
+        if pub is None:
+            return
+        parent = self._keyframe_marker_frame_id or self._camera_pose_debug_parent_frame()
+        if not parent:
+            return
+        from builtin_interfaces.msg import Time as TimeMsg
+        from geometry_msgs.msg import Point
+
+        pose = world_T_camera_to_pose_stamped(
+            world_T_camera,
+            header=Header(stamp=TimeMsg(sec=stamp_sec, nanosec=stamp_nsec), frame_id=parent),
+        )
+        length = max(0.05, float(self._keyframe_marker_length_m))
+        m = Marker()
+        m.header = pose.header
+        m.ns = "keyframe_camera_z"
+        m.id = int(idx)
+        m.type = Marker.LINE_LIST
+        m.action = Marker.ADD
+        m.pose = pose.pose
+        m.points = [Point(x=0.0, y=0.0, z=0.0), Point(x=0.0, y=0.0, z=length)]
+        m.scale.x = 0.03
+        m.color.r = 0.1
+        m.color.g = 0.9
+        m.color.b = 1.0
+        m.color.a = 1.0
+        pub.publish(m)
 
     def _on_tf_timer(self) -> None:
         if self._tf_buffer is None or self._last_image_msg is None:

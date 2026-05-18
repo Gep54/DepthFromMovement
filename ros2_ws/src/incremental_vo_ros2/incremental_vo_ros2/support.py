@@ -11,7 +11,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from geometry_msgs.msg import PoseStamped, Quaternion, TransformStamped
+from geometry_msgs.msg import PoseStamped, Quaternion, Transform, TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Header
@@ -48,6 +48,8 @@ __all__ = [
     "save_sparse_map_npz",
     "should_buffer_image",
     "transform_points_world_T_camera",
+    "transform_msg_to_world_T",
+    "transform_stamped_to_world_T",
     "effective_K_from_calibration",
     "undistort_gray_if_needed",
     "world_T_camera_to_quaternion_xyzw",
@@ -84,6 +86,20 @@ def quat_msg_to_mat(q: Quaternion) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def transform_msg_to_world_T(tr: Transform) -> np.ndarray:
+    """``geometry_msgs/Transform`` → 4×4 homogeneous (maps child frame into parent)."""
+    t = tr.translation
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = quat_msg_to_mat(tr.rotation)
+    T[:3, 3] = (t.x, t.y, t.z)
+    return T
+
+
+def transform_stamped_to_world_T(msg: TransformStamped) -> np.ndarray:
+    """``geometry_msgs/TransformStamped`` → 4×4 (source frame → ``header.frame_id``)."""
+    return transform_msg_to_world_T(msg.transform)
 
 
 def odom_to_cam_to_world_T(msg: Odometry) -> np.ndarray:
