@@ -478,9 +478,13 @@ class IncrementalVoNode(Node):
                 )
             )
             + (
-                f" | TF debug {self._base_frame!r}<-{self._camera_frame!r} every {tf_period}s"
+                f" | TF periodic debug {self._base_frame!r}<-{self._camera_frame!r} every {tf_period}s"
                 if tf_period > 0.0
-                else " | TF listener disabled (tf_lookup_period_s=0)"
+                else (
+                    " | TF extrinsic listener on (odom child→camera_frame)"
+                    if self._apply_tf_to_camera_pose
+                    else " | TF listener off"
+                )
             )
             + (
                 (
@@ -732,23 +736,25 @@ class IncrementalVoNode(Node):
         child = (msg.child_frame_id or "").strip()
         return child
 
-    def _lookup_child_T_camera(
-        self, msg: Odometry, *, allow_latest_fallback: bool = True
-    ) -> np.ndarray | None:
-        """SE(3) mapping camera optical → odom ``child_frame_id`` (static / dynamic extrinsic on ``/tf``)."""
-        if self._tf_buffer is None:
-            return None
-        child = self._odom_child_frame_id(msg)
-        if not child:
-            return None
+    def _tf_lookup_stamps(self, msg: Odometry, *, allow_latest_fallback: bool) -> list[Time]:
         stamps: list[Time] = [self._tf_time_from_odom(msg)]
         if allow_latest_fallback and not self._tf_use_latest:
             stamps.append(Time())
+        return stamps
+
+    def _lookup_transform_to_matrix(
+        self,
+        parent_frame: str,
+        child_frame: str,
+        stamps: list[Time],
+    ) -> np.ndarray | None:
+        if self._tf_buffer is None or not parent_frame or not child_frame:
+            return None
         for stamp in stamps:
             try:
                 t = self._tf_buffer.lookup_transform(
-                    child,
-                    self._camera_frame,
+                    parent_frame,
+                    child_frame,
                     stamp,
                     timeout=Duration(seconds=0.25),
                 )
@@ -756,6 +762,31 @@ class IncrementalVoNode(Node):
             except TransformException:
                 continue
         return None
+
+    def _lookup_world_T_camera_direct(
+        self, msg: Odometry, *, allow_latest_fallback: bool = True
+    ) -> np.ndarray | None:
+        """Full chain on ``/tf``: ``odom.header.frame_id`` ← ``camera_frame`` (matches RViz)."""
+        if not msg.header.frame_id:
+            return None
+        return self._lookup_transform_to_matrix(
+            msg.header.frame_id,
+            self._camera_frame,
+            self._tf_lookup_stamps(msg, allow_latest_fallback=allow_latest_fallback),
+        )
+
+    def _lookup_child_T_camera(
+        self, msg: Odometry, *, allow_latest_fallback: bool = True
+    ) -> np.ndarray | None:
+        """Extrinsic only: odom ``child_frame_id`` ← ``camera_frame`` (composed with odom pose)."""
+        child = self._odom_child_frame_id(msg)
+        if not child:
+            return None
+        return self._lookup_transform_to_matrix(
+            child,
+            self._camera_frame,
+            self._tf_lookup_stamps(msg, allow_latest_fallback=allow_latest_fallback),
+        )
 
     def _maybe_log_waiting_for_tf(self, msg: Odometry) -> None:
         now = time.monotonic()
