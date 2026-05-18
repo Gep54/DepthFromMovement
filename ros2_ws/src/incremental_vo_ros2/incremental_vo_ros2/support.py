@@ -15,6 +15,11 @@ from geometry_msgs.msg import Quaternion
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, Image
 
+from incremental_vo_ros2.se3 import (
+    rigid_transform_to_matrix4,
+    transform_points_world_T_camera,
+    world_T_camera_from_odom_extrinsic,
+)
 from incremental_vo_ros2.image_buffer import (
     copy_image_msg,
     image_msg_to_gray_undistorted,
@@ -38,6 +43,8 @@ __all__ = [
     "max_sparse_range_m",
     "odom_position_xyz",
     "odom_to_cam_to_world_T",
+    "rigid_transform_to_matrix4",
+    "world_T_camera_from_odom_extrinsic",
     "offline_dataset_image_basename",
     "pose_stamped_to_world_T_camera",
     "quat_msg_to_mat",
@@ -67,33 +74,19 @@ def ensure_pipeline_on_path() -> Path | None:
 
 def quat_msg_to_mat(q: Quaternion) -> np.ndarray:
     """Unit quaternion (x,y,z,w) → rotation matrix; no SciPy (matches ROS ``tf`` convention)."""
-    x, y, z, w = float(q.x), float(q.y), float(q.z), float(q.w)
-    n = math.sqrt(x * x + y * y + z * z + w * w) + 1e-12
-    x, y, z, w = x / n, y / n, z / n, w / n
-    xx, yy, zz = x * x, y * y, z * z
-    xy, xz, yz = x * y, x * z, y * z
-    wx, wy, wz = w * x, w * y, w * z
-    return np.array(
-        [
-            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
-            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
-            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
-        ],
-        dtype=np.float64,
-    )
+    from incremental_vo_ros2.se3 import quat_xyzw_to_mat
+
+    return quat_xyzw_to_mat(float(q.x), float(q.y), float(q.z), float(q.w))
 
 
 def odom_to_cam_to_world_T(msg: Odometry) -> np.ndarray:
     """
-    Build 4×4 ``cam_to_world`` (maps camera frame into ``msg.header.frame_id``), matching
-    ``pipeline``'s ``world_T_camera`` naming in datasets: X_world = T @ X_cam columns.
+    Build 4×4 ``world_T_odom_child`` from ``nav_msgs/Odometry`` (pose of ``child_frame_id`` in
+    ``header.frame_id``). This is **not** the optical camera frame unless ``child_frame_id`` is optical.
     """
     p = msg.pose.pose.position
     q = msg.pose.pose.orientation
-    T = np.eye(4, dtype=np.float64)
-    T[:3, :3] = quat_msg_to_mat(q)
-    T[:3, 3] = (p.x, p.y, p.z)
-    return T
+    return rigid_transform_to_matrix4(p, q)
 
 
 def odom_position_xyz(msg: Odometry) -> np.ndarray:
@@ -284,17 +277,6 @@ def save_sparse_map_eval_world_npz(
     Xh = np.vstack([X.T, np.ones((1, X.shape[0]))])
     Xe = (T @ Xh)[:3].T.astype(np.float64)
     np.savez_compressed(str(path), points=Xe)
-
-
-def transform_points_world_T_camera(points_nx3: np.ndarray, world_T_camera: np.ndarray) -> np.ndarray:
-    """Map N×3 points in **camera** frame to **world**: ``X_w = R @ X_c + t`` (``world_T_camera`` = cam→world)."""
-    T = np.asarray(world_T_camera, dtype=np.float64)
-    R = T[:3, :3]
-    t = T[:3, 3]
-    p = np.asarray(points_nx3, dtype=np.float64)
-    if p.size == 0:
-        return np.zeros((0, 3), dtype=np.float64)
-    return (p @ R.T) + t
 
 
 def save_sparse_map_npz(path: Path, points_xyz: np.ndarray) -> None:

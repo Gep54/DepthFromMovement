@@ -45,6 +45,7 @@ KNOWN_PARAMETERS = frozenset(
         "offline_dataset_root",
         "offline_dataset_image_prefix",
         "offline_dataset_pose_source",
+        "apply_tf_to_camera_pose",
         "base_frame",
         "camera_frame",
         "tf_lookup_period_s",

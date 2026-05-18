@@ -3,8 +3,8 @@
 
 Odometry ``pose`` updates the primary metric track. An optional ``geometry_msgs/PoseStamped`` topic
 supplies a second ``world_T_camera`` estimate (e.g. from optical flow upstream); :mod:`pipeline.metric_fusion`
-combines tracks before ``IncrementalMap`` consumes poses. If your camera is offset from ``child_frame_id``,
-fuse TF into ``cam_to_world`` before this node.
+combines tracks before ``IncrementalMap`` consumes poses. When ``apply_tf_to_camera_pose`` is true
+(default), ``world_T_camera`` = ``world_T_odom_child`` @ ``T(odom.child_frame_id → image optical)`` from TF.
 """
 
 from __future__ import annotations
@@ -53,6 +53,8 @@ from incremental_vo_ros2.support import (
     should_buffer_image,
     transform_points_world_T_camera,
     effective_K_from_calibration,
+    rigid_transform_to_matrix4,
+    world_T_camera_from_odom_extrinsic,
     world_T_camera_to_quaternion_xyzw,
 )
 
@@ -157,7 +159,8 @@ class IncrementalVoNode(Node):
         self.declare_parameter("offline_dataset_image_prefix", "frame")
         self.declare_parameter("offline_dataset_pose_source", "odom")
 
-        # Optional TF debug (off by default for rosbag-focused runs).
+        # TF: compose ``odom.child_frame_id`` → image optical frame into ``world_T_camera``.
+        self.declare_parameter("apply_tf_to_camera_pose", True)
         self.declare_parameter("base_frame", "uav1/base_link")
         self.declare_parameter("camera_frame", "uav1/stereo/left_optical")
         self.declare_parameter("tf_lookup_period_s", 0.0)
@@ -212,12 +215,19 @@ class IncrementalVoNode(Node):
         self._cx_auto = float(self.get_parameter("camera_cx").get_parameter_value().double_value)
         self._cy_auto = float(self.get_parameter("camera_cy").get_parameter_value().double_value)
 
+        self._apply_tf_extrinsic = (
+            self.get_parameter("apply_tf_to_camera_pose").get_parameter_value().bool_value
+        )
         self._base_frame = self.get_parameter("base_frame").get_parameter_value().string_value
         self._camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
         tf_period = self.get_parameter("tf_lookup_period_s").get_parameter_value().double_value
+        self._tf_lookup_period_s = tf_period
         self._tf_use_latest = (
             self.get_parameter("tf_use_latest_time").get_parameter_value().bool_value
         )
+        self._cached_odom_child_T_optical: np.ndarray | None = None
+        self._cached_extrinsic_pair: tuple[str, str] | None = None
+        self._last_tf_lookup_warn_time = 0.0
         log_hz = self.get_parameter("log_image_hz").get_parameter_value().double_value
         self._image_log_interval_s = 1.0 / log_hz if log_hz > 0.0 else math.inf
         self._last_image_log_time = self.get_clock().now()
@@ -384,11 +394,12 @@ class IncrementalVoNode(Node):
         if subscribe_gt:
             self.create_subscription(Odometry, odom_gt_topic, self._on_odom_gt, _odom_qos())
 
-        # Only spin a TF listener when periodic lookups are enabled (avoids /tf subscription and
-        # TF_OLD_DATA noise during rosbag playback when extrinsics are not needed).
-        if tf_period > 0.0:
+        # TF listener for extrinsic composition and/or periodic debug lookups.
+        need_tf_listener = self._apply_tf_extrinsic or tf_period > 0.0
+        if need_tf_listener:
             self._tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
             self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
+        if tf_period > 0.0:
             self.create_timer(tf_period, self._on_tf_timer)
 
         self.get_logger().info(
@@ -409,9 +420,19 @@ class IncrementalVoNode(Node):
                 )
             )
             + (
+                " | TF extrinsic odom_child→image applied to world_T_camera"
+                if self._apply_tf_extrinsic
+                else " | TF extrinsic disabled (apply_tf_to_camera_pose=false)"
+            )
+            + (
                 f" | TF debug {self._base_frame!r}<-{self._camera_frame!r} every {tf_period}s"
                 if tf_period > 0.0
-                else " | TF listener disabled (tf_lookup_period_s=0)"
+                else ""
+            )
+            + (
+                ""
+                if need_tf_listener
+                else (" | TF listener off" if not self._apply_tf_extrinsic else "")
             )
             + (
                 (
@@ -534,19 +555,100 @@ class IncrementalVoNode(Node):
             f"ratio_second_best={desc_cfg.ratio_second_best}"
         )
 
+    def _optical_frame_id(self, image_msg: Image | None) -> str:
+        if image_msg is not None:
+            fid = image_msg.header.frame_id.strip()
+            if fid:
+                return fid
+        return self._camera_frame.strip()
+
+    def _image_tf_time(self, image_msg: Image | None) -> Time:
+        if self._tf_use_latest or image_msg is None:
+            return Time()
+        if image_msg.header.stamp.sec == 0 and image_msg.header.stamp.nanosec == 0:
+            return Time()
+        return Time.from_msg(image_msg.header.stamp)
+
+    def _warn_tf_lookup_throttled(self, message: str) -> None:
+        now = time.time()
+        if now - self._last_tf_lookup_warn_time < 5.0:
+            return
+        self._last_tf_lookup_warn_time = now
+        self.get_logger().warning(message)
+
+    def _lookup_parent_T_child(
+        self, parent_frame: str, child_frame: str, image_msg: Image | None
+    ) -> np.ndarray | None:
+        if self._tf_buffer is None:
+            return None
+        if not parent_frame or not child_frame:
+            return None
+        if parent_frame == child_frame:
+            return np.eye(4, dtype=np.float64)
+        stamp = self._image_tf_time(image_msg)
+        try:
+            tf_msg = self._tf_buffer.lookup_transform(
+                parent_frame,
+                child_frame,
+                stamp,
+                timeout=Duration(seconds=0.2),
+            )
+        except TransformException as e:
+            self._warn_tf_lookup_throttled(
+                f"TF {parent_frame!r} <- {child_frame!r} failed: {e}"
+            )
+            return None
+        return rigid_transform_to_matrix4(
+            tf_msg.transform.translation, tf_msg.transform.rotation
+        )
+
+    def _odom_child_T_optical(
+        self, odom: Odometry, image_msg: Image | None
+    ) -> np.ndarray | None:
+        parent = odom.child_frame_id.strip()
+        optical = self._optical_frame_id(image_msg)
+        if not parent or not optical:
+            return None
+        pair = (parent, optical)
+        if parent == optical:
+            return np.eye(4, dtype=np.float64)
+        ext = self._lookup_parent_T_child(parent, optical, image_msg)
+        if ext is not None:
+            self._cached_odom_child_T_optical = ext
+            self._cached_extrinsic_pair = pair
+        elif self._cached_extrinsic_pair == pair and self._cached_odom_child_T_optical is not None:
+            ext = self._cached_odom_child_T_optical
+        return ext
+
+    def _world_T_camera_optical_from_odom(
+        self, odom: Odometry, image_msg: Image | None
+    ) -> np.ndarray:
+        world_T_parent = odom_to_cam_to_world_T(odom)
+        if not self._apply_tf_extrinsic:
+            return world_T_parent
+        extrinsic = self._odom_child_T_optical(odom, image_msg)
+        if extrinsic is None:
+            self._warn_tf_lookup_throttled(
+                f"Using odom pose without TF extrinsic ({odom.child_frame_id!r} → "
+                f"{self._optical_frame_id(image_msg)!r}); enable /tf or check frame names."
+            )
+            return world_T_parent
+        return world_T_camera_from_odom_extrinsic(world_T_parent, extrinsic)
+
     def _fused_cam_to_world_and_pos(self) -> tuple[np.ndarray, np.ndarray]:
         if self._pose_fusion is not None:
             T = self._pose_fusion.fused_world_T_camera()
             return T, T[:3, 3].copy()
         assert self._last_odom is not None
-        T = odom_to_cam_to_world_T(self._last_odom)
-        return T, odom_position_xyz(self._last_odom)
+        T = self._world_T_camera_optical_from_odom(self._last_odom, self._last_image_msg)
+        return T, T[:3, 3].copy()
 
     def _current_metric_position(self) -> np.ndarray:
         if self._pose_fusion is not None:
             return self._pose_fusion.fused_position_xyz()
         assert self._last_odom is not None
-        return odom_position_xyz(self._last_odom)
+        T = self._world_T_camera_optical_from_odom(self._last_odom, self._last_image_msg)
+        return T[:3, 3].copy()
 
     def _travel_fraction_since_last_kf(self) -> float | None:
         """``‖pos − last_kf‖ / keyframe_distance_m``; ``None`` if no keyframe committed yet."""
@@ -578,7 +680,7 @@ class IncrementalVoNode(Node):
             self._maybe_log_image_throttle(msg)
             return
         T, pos = self._fused_cam_to_world_and_pos()
-        odom_T = odom_to_cam_to_world_T(self._last_odom)
+        odom_T = odom_to_cam_to_world_T(self._last_odom)  # raw odom child (e.g. fcu), not optical
         qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T)
         bf = BufferedFrame(
             stamp_sec=msg.header.stamp.sec,
@@ -612,7 +714,7 @@ class IncrementalVoNode(Node):
     def _on_odom_main(self, msg: Odometry) -> None:
         self._last_odom = msg
         if self._pose_fusion is not None:
-            T = odom_to_cam_to_world_T(msg)
+            T = self._world_T_camera_optical_from_odom(msg, self._last_image_msg)
             self._pose_fusion.push_odom_world_T_camera(
                 T, (msg.header.stamp.sec, msg.header.stamp.nanosec)
             )
@@ -775,30 +877,30 @@ class IncrementalVoNode(Node):
     def _on_tf_timer(self) -> None:
         if self._tf_buffer is None or self._last_image_msg is None:
             return
-        if self._tf_use_latest or (
-            self._last_image_msg.header.stamp.sec == 0
-            and self._last_image_msg.header.stamp.nanosec == 0
-        ):
-            stamp = Time()
-        else:
-            stamp = Time.from_msg(self._last_image_msg.header.stamp)
-        try:
-            t = self._tf_buffer.lookup_transform(
-                self._base_frame,
-                self._camera_frame,
-                stamp,
-                timeout=Duration(seconds=0.5),
-            )
-        except TransformException as e:
-            self.get_logger().warn(
-                f"TF {self._base_frame!r} <- {self._camera_frame!r} @ image stamp failed: {e}"
-            )
-            return
-        tr = t.transform.translation
-        self.get_logger().info(
-            f"camera in base: t=({tr.x:.3f},{tr.y:.3f},{tr.z:.3f}) "
-            f"(image stamp {self._last_image_msg.header.stamp.sec}.{self._last_image_msg.header.stamp.nanosec:09d})"
+        t = self._lookup_parent_T_child(
+            self._base_frame, self._camera_frame, self._last_image_msg
         )
+        if t is None:
+            return
+        tr = t[:3, 3]
+        R = t[:3, :3]
+        qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(t)
+        self.get_logger().info(
+            f"TF {self._base_frame!r}<-{self._camera_frame!r}: "
+            f"t=({tr[0]:.3f},{tr[1]:.3f},{tr[2]:.3f}) "
+            f"R[forward]={R[:, 2]} q=({qx:.4f},{qy:.4f},{qz:.4f},{qw:.4f}) "
+            f"(image stamp {self._last_image_msg.header.stamp.sec}."
+            f"{self._last_image_msg.header.stamp.nanosec:09d})"
+        )
+        if self._last_odom is not None and self._apply_tf_extrinsic:
+            ext = self._odom_child_T_optical(self._last_odom, self._last_image_msg)
+            if ext is not None:
+                parent = self._last_odom.child_frame_id.strip()
+                optical = self._optical_frame_id(self._last_image_msg)
+                et = ext[:3, 3]
+                self.get_logger().info(
+                    f"TF extrinsic {parent!r}<-{optical!r}: t=({et[0]:.3f},{et[1]:.3f},{et[2]:.3f})"
+                )
 
     def _on_sparse_map_timer(self) -> None:
         pub = self._sparse_map_pub
