@@ -11,9 +11,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from geometry_msgs.msg import Quaternion
+from geometry_msgs.msg import PoseStamped, Quaternion, TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Header
 
 from incremental_vo_ros2.image_buffer import (
     copy_image_msg,
@@ -50,6 +51,8 @@ __all__ = [
     "effective_K_from_calibration",
     "undistort_gray_if_needed",
     "world_T_camera_to_quaternion_xyzw",
+    "world_T_camera_to_pose_stamped",
+    "world_T_camera_to_transform_stamped",
 ]
 
 
@@ -144,6 +147,44 @@ def pose_stamped_to_world_T_camera(msg) -> np.ndarray:
     T[:3, :3] = quat_msg_to_mat(q)
     T[:3, 3] = (p.x, p.y, p.z)
     return T
+
+
+def world_T_camera_to_pose_stamped(
+    T: np.ndarray,
+    *,
+    header: Header,
+) -> PoseStamped:
+    """4×4 ``world_T_camera`` (cam→world) → ``geometry_msgs/PoseStamped`` in ``header.frame_id``."""
+    T = np.asarray(T, dtype=np.float64)
+    qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T)
+    msg = PoseStamped()
+    msg.header = header
+    msg.pose.position.x = float(T[0, 3])
+    msg.pose.position.y = float(T[1, 3])
+    msg.pose.position.z = float(T[2, 3])
+    msg.pose.orientation.x = qx
+    msg.pose.orientation.y = qy
+    msg.pose.orientation.z = qz
+    msg.pose.orientation.w = qw
+    return msg
+
+
+def world_T_camera_to_transform_stamped(
+    T: np.ndarray,
+    *,
+    header: Header,
+    child_frame_id: str,
+) -> TransformStamped:
+    """4×4 ``world_T_camera`` → ``geometry_msgs/TransformStamped`` (parent→child for RViz / tf2)."""
+    pose = world_T_camera_to_pose_stamped(T, header=header)
+    out = TransformStamped()
+    out.header = pose.header
+    out.child_frame_id = child_frame_id
+    out.transform.translation.x = pose.pose.position.x
+    out.transform.translation.y = pose.pose.position.y
+    out.transform.translation.z = pose.pose.position.z
+    out.transform.rotation = pose.pose.orientation
+    return out
 
 
 def camera_info_to_calibration(msg: CameraInfo):
