@@ -45,7 +45,6 @@ from incremental_vo_ros2.support import (
     eval_world_T_camera0_from_parameter,
     image_msg_to_gray_undistorted,
     max_sparse_range_m,
-    odom_position_xyz,
     odom_to_cam_to_world_T,
     pose_stamped_to_world_T_camera,
     save_keyframe_manifest,
@@ -350,6 +349,7 @@ class IncrementalVoNode(Node):
             self.get_parameter("apply_tf_to_camera_pose").get_parameter_value().bool_value
         )
         self._last_tf_warn_time = 0.0
+        self._last_tf_wait_log_time = 0.0
         self._last_consecutive_baseline_m: float | None = None
 
         self._pose_fusion = None
@@ -627,25 +627,30 @@ class IncrementalVoNode(Node):
             f"ratio_second_best={desc_cfg.ratio_second_best}"
         )
 
-    def _fused_cam_to_world_and_pos(self) -> tuple[np.ndarray, np.ndarray]:
+    def _fused_cam_to_world_and_pos(self) -> tuple[np.ndarray, np.ndarray] | None:
         if self._pose_fusion is not None:
             T = self._pose_fusion.fused_world_T_camera()
             return T, T[:3, 3].copy()
         assert self._last_odom is not None
-        T = self._world_T_camera_from_odom(self._last_odom)
+        allow_fb = self._last_kf_pos is not None
+        T = self._world_T_camera_from_odom(self._last_odom, allow_odom_fallback=allow_fb)
+        if T is None:
+            return None
         return T, T[:3, 3].copy()
 
-    def _current_metric_position(self) -> np.ndarray:
-        if self._pose_fusion is not None:
-            return self._pose_fusion.fused_position_xyz()
-        assert self._last_odom is not None
-        return odom_position_xyz(self._last_odom)
+    def _current_metric_position(self) -> np.ndarray | None:
+        fused = self._fused_cam_to_world_and_pos()
+        if fused is None:
+            return None
+        return fused[1]
 
     def _travel_fraction_since_last_kf(self) -> float | None:
         """``‖pos − last_kf‖ / keyframe_distance_m``; ``None`` if no keyframe committed yet."""
         if self._last_kf_pos is None or self._d <= 0.0:
             return None
         pos_cur = self._current_metric_position()
+        if pos_cur is None:
+            return None
         return float(np.linalg.norm(pos_cur - self._last_kf_pos) / self._d)
 
     def _maybe_clear_buffer_for_fraction(self) -> None:
@@ -661,6 +666,9 @@ class IncrementalVoNode(Node):
             return
         if self._last_odom is None:
             return
+        if self._last_kf_pos is None and not self._can_resolve_camera_pose_from_odom(self._last_odom):
+            self._maybe_log_waiting_for_tf(self._last_odom)
+            return
         fraction = self._travel_fraction_since_last_kf()
         if not should_buffer_image(
             fraction,
@@ -670,8 +678,15 @@ class IncrementalVoNode(Node):
             self._maybe_clear_buffer_for_fraction()
             self._maybe_log_image_throttle(msg)
             return
-        T, pos = self._fused_cam_to_world_and_pos()
-        odom_T = self._world_T_camera_from_odom(self._last_odom)
+        fused = self._fused_cam_to_world_and_pos()
+        if fused is None:
+            return
+        T, pos = fused
+        odom_T = self._world_T_camera_from_odom(
+            self._last_odom, allow_odom_fallback=self._last_kf_pos is not None
+        )
+        if odom_T is None:
+            return
         qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T)
         bf = BufferedFrame(
             stamp_sec=msg.header.stamp.sec,
@@ -713,12 +728,40 @@ class IncrementalVoNode(Node):
             self._last_tf_warn_time = now
             self.get_logger().warning(message)
 
-    def _world_T_camera_from_odom(self, msg: Odometry) -> np.ndarray:
+    def _maybe_log_waiting_for_tf(self, msg: Odometry) -> None:
+        now = time.monotonic()
+        if now - self._last_tf_wait_log_time >= 5.0:
+            self._last_tf_wait_log_time = now
+            self.get_logger().info(
+                f"Waiting for TF {msg.header.frame_id!r} <- {self._camera_frame!r} "
+                "before first keyframe (apply_tf_to_camera_pose=true)."
+            )
+
+    def _can_resolve_camera_pose_from_odom(self, msg: Odometry) -> bool:
+        """True when ``_world_T_camera_from_odom`` can use TF (required before first keyframe if apply_tf)."""
+        if not self._apply_tf_to_camera_pose:
+            return True
+        if self._tf_buffer is None or not msg.header.frame_id:
+            return False
+        try:
+            self._tf_buffer.lookup_transform(
+                msg.header.frame_id,
+                self._camera_frame,
+                self._tf_time_from_odom(msg),
+                timeout=Duration(seconds=0.25),
+            )
+            return True
+        except TransformException:
+            return False
+
+    def _world_T_camera_from_odom(
+        self, msg: Odometry, *, allow_odom_fallback: bool = True
+    ) -> np.ndarray | None:
         """Metric camera→world; optionally compose odom child frame with TF to ``camera_frame``."""
         if not self._apply_tf_to_camera_pose or self._tf_buffer is None:
             return odom_to_cam_to_world_T(msg)
         if not msg.header.frame_id:
-            return odom_to_cam_to_world_T(msg)
+            return odom_to_cam_to_world_T(msg) if allow_odom_fallback else None
         try:
             t = self._tf_buffer.lookup_transform(
                 msg.header.frame_id,
@@ -728,6 +771,8 @@ class IncrementalVoNode(Node):
             )
             return transform_stamped_to_world_T(t)
         except TransformException as e:
+            if not allow_odom_fallback:
+                return None
             self._maybe_warn_tf(
                 f"TF {msg.header.frame_id!r} <- {self._camera_frame!r} failed ({e}); "
                 "using odom pose without extrinsic."
@@ -747,7 +792,10 @@ class IncrementalVoNode(Node):
         parent = self._camera_pose_debug_parent_frame()
         if not parent:
             return
-        T, _ = self._fused_cam_to_world_and_pos()
+        fused = self._fused_cam_to_world_and_pos()
+        if fused is None:
+            return
+        T, _ = fused
         hdr = Header()
         hdr.stamp = stamp
         hdr.frame_id = parent
@@ -767,10 +815,14 @@ class IncrementalVoNode(Node):
     def _on_odom_main(self, msg: Odometry) -> None:
         self._last_odom = msg
         if self._pose_fusion is not None:
-            T = self._world_T_camera_from_odom(msg)
-            self._pose_fusion.push_odom_world_T_camera(
-                T, (msg.header.stamp.sec, msg.header.stamp.nanosec)
-            )
+            allow_fb = self._last_kf_pos is not None
+            T = self._world_T_camera_from_odom(msg, allow_odom_fallback=allow_fb)
+            if T is not None:
+                self._pose_fusion.push_odom_world_T_camera(
+                    T, (msg.header.stamp.sec, msg.header.stamp.nanosec)
+                )
+            elif self._last_kf_pos is None:
+                self._maybe_log_waiting_for_tf(msg)
         self._publish_camera_pose_debug(msg.header.stamp)
         self._maybe_clear_buffer_for_fraction()
         self._try_keyframe_selection()
@@ -798,14 +850,19 @@ class IncrementalVoNode(Node):
         if self._inc_map is None:
             return
 
-        # First keyframe: take the earliest buffered frame once odom + intrinsics exist.
+        # First keyframe: require optical-frame TF when apply_tf_to_camera_pose (locks W0_raw).
         if self._last_kf_pos is None:
+            if not self._can_resolve_camera_pose_from_odom(self._last_odom):
+                self._maybe_log_waiting_for_tf(self._last_odom)
+                return
             bf0 = self._buffer.pop(0)
             self._buffer.clear()
             self._commit_keyframe(bf0, distance_trigger_m=None)
             return
 
         pos_cur = self._current_metric_position()
+        if pos_cur is None:
+            return
         dist = float(np.linalg.norm(pos_cur - self._last_kf_pos))
         if dist < self._d:
             return
