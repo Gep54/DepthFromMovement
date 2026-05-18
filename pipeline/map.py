@@ -44,6 +44,8 @@ class TwoViewResult:
     reproj: dict[str, float]
     """Rows aligned with columns of ``X_world_h`` (inlier correspondences); invalid rows ignored."""
     descriptors: np.ndarray | None = None
+    X_cam_h: np.ndarray | None = None
+    """Homogeneous 3D points in camera ``frame_i`` (4,N); same columns as ``X_world_h``."""
 
 
 @dataclass
@@ -100,6 +102,7 @@ class IncrementalMap:
                 scale=1.0,
                 scale_ok=False,
                 X_world_h=empty,
+                X_cam_h=empty,
                 cheiral_mask=np.zeros((0,), bool),
                 reproj={},
                 descriptors=None,
@@ -137,6 +140,7 @@ class IncrementalMap:
                 scale=1.0,
                 scale_ok=False,
                 X_world_h=empty_h,
+                X_cam_h=empty_h,
                 cheiral_mask=np.zeros((0,), bool),
                 reproj={},
                 descriptors=(
@@ -176,6 +180,7 @@ class IncrementalMap:
             scale=scale,
             scale_ok=scale_ok,
             X_world_h=X_h,
+            X_cam_h=X_cam_h,
             cheiral_mask=cheiral,
             reproj=reproj,
             descriptors=desc_inlier,

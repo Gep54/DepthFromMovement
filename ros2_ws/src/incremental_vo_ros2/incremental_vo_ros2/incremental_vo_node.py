@@ -45,11 +45,11 @@ from incremental_vo_ros2.support import (
     image_msg_to_gray_undistorted,
     max_sparse_range_m,
     odom_to_cam_to_world_T,
+    should_reset_bag_replay,
     save_keyframe_manifest,
     save_sparse_map_eval_world_npz,
     save_sparse_map_npz,
     should_buffer_image,
-    transform_points_world_T_camera,
     transform_stamped_to_world_T,
     effective_K_from_calibration,
     world_T_camera_to_pose_stamped,
@@ -210,6 +210,8 @@ class IncrementalVoNode(Node):
         self.declare_parameter("descriptor_ratio_second_best", -1.0)
 
         self.declare_parameter("eval_world_T_camera0", [0.0] * 16)
+        self.declare_parameter("bag_replay_reset_enabled", True)
+        self.declare_parameter("bag_replay_reset_jump_s", 1.0)
 
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         camera_info_topic = (
@@ -357,12 +359,16 @@ class IncrementalVoNode(Node):
         self._last_tf_warn_time = 0.0
         self._last_tf_wait_log_time = 0.0
         self._last_consecutive_baseline_m: float | None = None
+        self._bag_replay_reset_enabled = (
+            self.get_parameter("bag_replay_reset_enabled").get_parameter_value().bool_value
+        )
+        self._bag_replay_reset_jump_s = float(
+            self.get_parameter("bag_replay_reset_jump_s").get_parameter_value().double_value
+        )
+        self._last_message_stamp_s: float | None = None
 
-        stamp_tag = time.strftime("%Y%m%d_%H%M%S")
-        self._run_dir = (out_root.resolve() / "ros2_runs" / f"run_{stamp_tag}").resolve()
-        self._run_dir.mkdir(parents=True, exist_ok=True)
-        if self._save_run_on_shutdown:
-            (self._run_dir / "images").mkdir(exist_ok=True)
+        self._allocate_run_dir(out_root)
+        run_tag = self._run_dir.name
 
         self._offline_dataset_dir: Path | None = None
         self._offline_motion_frames: list[dict] = []
@@ -371,7 +377,7 @@ class IncrementalVoNode(Node):
                 self._offline_dataset_dir = Path(offline_root_param).expanduser().resolve()
             else:
                 self._offline_dataset_dir = (
-                    out_root.resolve() / "offline_datasets" / f"run_{stamp_tag}"
+                    out_root.resolve() / "offline_datasets" / run_tag
                 ).resolve()
             self._offline_dataset_dir.mkdir(parents=True, exist_ok=True)
             (self._offline_dataset_dir / "images").mkdir(exist_ok=True)
@@ -391,6 +397,7 @@ class IncrementalVoNode(Node):
         self._effective_desc_cfg = None
         self._persisted = False
         self._world_T_camera_raw: list[np.ndarray] = []
+        self._world_T_drone_raw: list[np.ndarray] = []
         self._tf_buffer: Buffer | None = None
         self._tf_message_count = 0
         self._tf_static_message_count = 0
@@ -651,7 +658,50 @@ class IncrementalVoNode(Node):
         if frac is not None and frac < self._buffer_start_fraction:
             self._buffer.clear()
 
+    @staticmethod
+    def _stamp_to_sec(stamp_sec: int, stamp_nsec: int) -> float:
+        return float(stamp_sec) + float(stamp_nsec) * 1e-9
+
+    def _allocate_run_dir(self, out_root: Path) -> None:
+        stamp_tag = time.strftime("%Y%m%d_%H%M%S")
+        self._run_dir = (out_root.resolve() / "ros2_runs" / f"run_{stamp_tag}").resolve()
+        self._run_dir.mkdir(parents=True, exist_ok=True)
+        if self._save_run_on_shutdown:
+            (self._run_dir / "images").mkdir(parents=True, exist_ok=True)
+
+    def _check_bag_replay_reset(self, stamp_sec: int, stamp_nsec: int) -> None:
+        if not self._bag_replay_reset_enabled:
+            return
+        t = self._stamp_to_sec(stamp_sec, stamp_nsec)
+        if should_reset_bag_replay(self._last_message_stamp_s, t, self._bag_replay_reset_jump_s):
+            self._reset_for_new_bag()
+        self._last_message_stamp_s = t
+
+    def _reset_for_new_bag(self) -> None:
+        self._desc_map = None
+        self._inc_map = None
+        self._effective_desc_cfg = None
+        self._world_T_camera.clear()
+        self._world_T_camera_raw.clear()
+        self._world_T_drone_raw.clear()
+        self._gray_kf.clear()
+        self._kf_records.clear()
+        self._buffer.clear()
+        self._last_kf_pos = None
+        self._last_consecutive_baseline_m = None
+        self._persisted = False
+        self._last_message_stamp_s = None
+        out_root = Path(self.get_parameter("output_root").get_parameter_value().string_value).expanduser()
+        self._allocate_run_dir(out_root)
+        self.get_logger().info(
+            f"Bag replay detected (sim time jumped backward); sparse map cleared. "
+            f"New run directory: {self._run_dir}"
+        )
+        if self._K is not None:
+            self._init_map_if_possible()
+
     def _on_image(self, msg: Image) -> None:
+        self._check_bag_replay_reset(msg.header.stamp.sec, msg.header.stamp.nanosec)
         self._last_image_msg = msg
         image_frame = self._normalize_tf_frame(msg.header.frame_id)
         if image_frame and not self._latched_sensor_frame_id:
@@ -1083,6 +1133,7 @@ class IncrementalVoNode(Node):
             )
 
     def _on_odom_main(self, msg: Odometry) -> None:
+        self._check_bag_replay_reset(msg.header.stamp.sec, msg.header.stamp.nanosec)
         self._last_odom = msg
         self._publish_camera_pose_debug(msg.header.stamp)
         self._maybe_clear_buffer_for_fraction()
@@ -1181,6 +1232,7 @@ class IncrementalVoNode(Node):
             manifest_path = log_path
 
         self._world_T_camera_raw.append(bf.cam_to_world.copy())
+        self._world_T_drone_raw.append(odom_to_cam_to_world_T(self._last_odom))
         self._world_T_camera[:] = canonicalize_world_T_camera_to_first(self._world_T_camera_raw)
         self._gray_kf.append(gray)
 
@@ -1212,18 +1264,19 @@ class IncrementalVoNode(Node):
         self.get_logger().info(msg)
         self._publish_keyframe_z_marker(idx, bf.cam_to_world, bf.stamp_sec, bf.stamp_nsec)
 
-        max_range_cam0: float | None = None
+        max_range_world: float | None = None
+        cam_anchor = self._world_T_camera_raw[idx][:3, 3].copy()
         if idx >= 1 and len(self._world_T_camera) > idx:
             baseline_m = consecutive_keyframe_baseline_m(
                 self._world_T_camera[idx - 1], self._world_T_camera[idx]
             )
             self._last_consecutive_baseline_m = baseline_m
-            max_range_cam0 = max_sparse_range_m(baseline_m, self._sparse_map_range_factor)
-            if max_range_cam0 is not None and self._desc_map is not None:
-                pruned = self._desc_map.prune_beyond_range_cam0(max_range_cam0)
+            max_range_world = max_sparse_range_m(baseline_m, self._sparse_map_range_factor)
+            if max_range_world is not None and self._desc_map is not None:
+                pruned = self._desc_map.prune_beyond_range_world(max_range_world, cam_anchor)
                 self.get_logger().info(
                     f"Sparse range gate keyframe {idx}: baseline={baseline_m:.4f} m "
-                    f"max_range_cam0={max_range_cam0:.4f} m pruned={pruned}"
+                    f"max_range_world={max_range_world:.4f} m pruned={pruned}"
                 )
 
         if idx >= 1 and self._inc_map is not None:
@@ -1236,13 +1289,14 @@ class IncrementalVoNode(Node):
                     if (
                         tw.scale_ok
                         and self._desc_map is not None
-                        and len(self._world_T_camera) > 0
+                        and len(self._world_T_camera_raw) > i
                     ):
                         try:
                             self._desc_map.integrate(
                                 tw,
-                                self._world_T_camera[0],
-                                max_range_cam0=max_range_cam0,
+                                world_T_camera_raw=self._world_T_camera_raw[i],
+                                world_T_drone_raw=self._world_T_drone_raw[i],
+                                max_range_world=max_range_world,
                                 spatial_merge_radius_m=self._d,
                             )
                         except Exception as ex:
@@ -1323,13 +1377,11 @@ class IncrementalVoNode(Node):
 
     def _on_sparse_map_timer(self) -> None:
         pub = self._sparse_map_pub
-        if pub is None or self._desc_map is None or not self._world_T_camera_raw:
+        if pub is None or self._desc_map is None:
             return
-        pts_c = self._desc_map.positions_cam0()
-        if pts_c.size == 0:
+        pts_w = self._desc_map.positions_world()
+        if pts_w.size == 0:
             return
-        W0 = self._world_T_camera_raw[0]
-        pts_w = transform_points_world_T_camera(pts_c, W0)
         if self._sparse_map_frame_id_override:
             fid = self._sparse_map_frame_id_override
         elif self._last_odom is not None:
@@ -1419,8 +1471,8 @@ class IncrementalVoNode(Node):
                 if self._effective_desc_cfg is not None
                 else None
             ),
-            landmarks_reference_frame="camera_0" if self._desc_map is not None else None,
-            map_coordinate_frame="camera0",
+            landmarks_reference_frame=header_frame if self._desc_map is not None else None,
+            map_coordinate_frame=header_frame if self._desc_map is not None else None,
             eval_world_T_camera0_flat16=(
                 self._eval_world_T_cam0.reshape(16).tolist()
                 if self._eval_world_T_cam0 is not None
@@ -1429,11 +1481,14 @@ class IncrementalVoNode(Node):
         )
         pts = np.zeros((0, 3), dtype=np.float64)
         if self._desc_map is not None:
-            pts = self._desc_map.positions_cam0()
+            pts = self._desc_map.positions_world()
         save_sparse_map_npz(self._run_dir / "sparse_map.npz", pts)
-        if self._eval_world_T_cam0 is not None:
+        if self._eval_world_T_cam0 is not None and self._world_T_camera_raw:
+            from pipeline.geometry import invert_se3
+
+            world_T_eval = self._eval_world_T_cam0 @ invert_se3(self._world_T_camera_raw[0])
             save_sparse_map_eval_world_npz(
-                self._run_dir / "sparse_map_eval_world.npz", pts, self._eval_world_T_cam0
+                self._run_dir / "sparse_map_eval_world.npz", pts, world_T_eval
             )
         if self._desc_map is not None:
             try:
@@ -1446,7 +1501,7 @@ class IncrementalVoNode(Node):
                 self.get_logger().warn(f"export_landmarks_csv failed: {e}")
         self.get_logger().info(
             f"Saved run: {self._run_dir} ({len(self._kf_records)} keyframes, "
-            f"{pts.shape[0]} descriptor landmarks in cam0 frame)"
+            f"{pts.shape[0]} descriptor landmarks in odom world frame)"
         )
 
     def destroy_node(self) -> None:

@@ -17,8 +17,10 @@ from pipeline.descriptor_landmark_map import (
     DescriptorLandmark,
     DescriptorLandmarkMap,
     DescriptorMapConfig,
+    distance_from_anchor,
     export_landmarks_csv,
-    world_point_to_cam0,
+    point_camera_to_drone_to_world,
+    world_point_to_camera_frame,
 )
 from pipeline.fusion import FusedLandmarkMap, FusedLandmark, fused_world_points_homogeneous
 from pipeline.metrics import reprojection_errors, summarize_reprojection
@@ -49,7 +51,9 @@ __all__ = [
     "DescriptorLandmarkMap",
     "DescriptorMapConfig",
     "export_landmarks_csv",
-    "world_point_to_cam0",
+    "point_camera_to_drone_to_world",
+    "world_point_to_camera_frame",
+    "distance_from_anchor",
     "fused_world_points_homogeneous",
     "reprojection_errors",
     "summarize_reprojection",

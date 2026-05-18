@@ -26,6 +26,7 @@ from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
 from incremental_vo_ros2.range_gate import (
     consecutive_keyframe_baseline_m,
     max_sparse_range_m,
+    should_reset_bag_replay,
 )
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "eval_world_T_camera0_from_parameter",
     "image_msg_to_gray_undistorted",
     "max_sparse_range_m",
+    "should_reset_bag_replay",
     "odom_position_xyz",
     "odom_to_cam_to_world_T",
     "offline_dataset_image_basename",
@@ -323,14 +325,14 @@ def eval_world_T_camera0_from_parameter(values: Sequence[float]) -> np.ndarray |
 
 
 def save_sparse_map_eval_world_npz(
-    path: Path, points_cam0_xyz: np.ndarray, eval_world_T_camera0: np.ndarray
+    path: Path, points_xyz: np.ndarray, world_T_eval: np.ndarray
 ) -> None:
-    """Save ``points`` in evaluation world: ``X_eval = T @ homog(X_cam0)`` (``T`` = ``eval_world_T_camera0``)."""
-    X = np.asarray(points_cam0_xyz, dtype=np.float64)
+    """Save ``points`` in evaluation world: ``X_eval = T @ homog(X)`` (``T`` = ``world_T_eval``)."""
+    X = np.asarray(points_xyz, dtype=np.float64)
     if X.size == 0:
         np.savez_compressed(str(path), points=np.zeros((0, 3), dtype=np.float64))
         return
-    T = np.asarray(eval_world_T_camera0, dtype=np.float64)
+    T = np.asarray(world_T_eval, dtype=np.float64)
     Xh = np.vstack([X.T, np.ones((1, X.shape[0]))])
     Xe = (T @ Xh)[:3].T.astype(np.float64)
     np.savez_compressed(str(path), points=Xe)

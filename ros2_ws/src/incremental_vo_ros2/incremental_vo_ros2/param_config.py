@@ -67,6 +67,8 @@ KNOWN_PARAMETERS = frozenset(
         "descriptor_max_match_distance",
         "descriptor_ratio_second_best",
         "eval_world_T_camera0",
+        "bag_replay_reset_enabled",
+        "bag_replay_reset_jump_s",
     }
 )
 

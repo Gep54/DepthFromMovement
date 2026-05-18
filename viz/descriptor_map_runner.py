@@ -6,11 +6,40 @@ import cv2
 import numpy as np
 
 from data.dataset import Dataset, read_image_bgr
-from pipeline.descriptor_landmark_map import DescriptorLandmarkMap, DescriptorMapConfig
+from pipeline.descriptor_landmark_map import (
+    DescriptorLandmarkMap,
+    DescriptorMapConfig,
+    world_point_to_camera_frame,
+)
 from pipeline.features import compute_frame_features_cache
 from pipeline.map import IncrementalMap, MapConfig
 from viz.overlays import estimated_depth_visualization, project_points_topdown
-from viz.step_runner import _undistort_if_needed, iter_sequence_pairs
+
+
+def _undistort_if_needed(bgr: np.ndarray, ds: Dataset) -> tuple[np.ndarray, np.ndarray]:
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    if ds.calibration.dist_coeffs is None or np.linalg.norm(ds.calibration.dist_coeffs) < 1e-9:
+        return bgr, gray
+    new_K, _ = cv2.getOptimalNewCameraMatrix(
+        ds.calibration.K,
+        ds.calibration.dist_coeffs,
+        (bgr.shape[1], bgr.shape[0]),
+        alpha=0,
+    )
+    und = cv2.undistort(bgr, ds.calibration.K, ds.calibration.dist_coeffs, None, newK=new_K)
+    g = cv2.cvtColor(und, cv2.COLOR_BGR2GRAY)
+    return und, g
+
+
+def iter_sequence_pairs(n_frames: int, pair_lookback: int) -> list[tuple[int, int]]:
+    """Indices ``j`` paired with earlier frames ``j-off`` for ``off`` in ``1..min(pair_lookback, j)``."""
+    wl = max(1, int(pair_lookback))
+    out: list[tuple[int, int]] = []
+    for j in range(1, n_frames):
+        for off in range(1, min(wl, j) + 1):
+            i = j - off
+            out.append((i, j))
+    return out
 
 
 def project_cam0_to_uv_z(K: np.ndarray, X_cam0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -34,7 +63,10 @@ def run_descriptor_landmark_pipeline(
     save_iter_viz: bool = False,
 ) -> DescriptorLandmarkMap:
     """
-    Multi-baseline pairing (same as sequence export), landmark fusion in camera-0 frame.
+    Multi-baseline pairing (same as sequence export), landmark fusion in dataset world frame.
+
+    Offline datasets have no separate body frame: ``world_T_drone`` is set equal to
+    ``world_T_camera`` at each frame (camera→world only).
 
     Writes ``run_dir/descriptor_map/landmarks_topdown.png``,
     ``run_dir/descriptor_map/sparse_depth_cam0.png``, and optional ``iter/*.png``.
@@ -68,7 +100,6 @@ def run_descriptor_landmark_pipeline(
         window=10**9,
     )
     desc_map = DescriptorLandmarkMap(desc_cfg)
-    W0 = ds.world_T_camera[0]
 
     wl = max(1, int(pair_lookback))
     pairs = iter_sequence_pairs(n, wl)
@@ -81,9 +112,11 @@ def run_descriptor_landmark_pipeline(
             features_i=frame_cache[i],
             features_j=frame_cache[j],
         )
+        W_i = ds.world_T_camera[i]
         desc_map.integrate(
             tw,
-            W0,
+            world_T_camera_raw=W_i,
+            world_T_drone_raw=W_i,
             spatial_merge_radius_m=desc_cfg.spatial_merge_radius_m,
         )
         if save_iter_viz:
@@ -94,15 +127,26 @@ def run_descriptor_landmark_pipeline(
     return desc_map
 
 
+def _world_positions_to_cam0(ds: Dataset, xyz_world: np.ndarray) -> np.ndarray:
+    W0 = ds.world_T_camera[0]
+    if xyz_world.size == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    return np.stack(
+        [world_point_to_camera_frame(xyz_world[k], W0) for k in range(xyz_world.shape[0])],
+        axis=0,
+    )
+
+
 def _write_final_plots(dm_root: Path, ds: Dataset, desc_map: DescriptorLandmarkMap) -> None:
     K = ds.calibration.K
-    xyz = desc_map.positions_cam0()
-    top = project_points_topdown(xyz if xyz.shape[0] else np.zeros((0, 3)))
+    xyz_world = desc_map.positions_world()
+    top = project_points_topdown(xyz_world if xyz_world.shape[0] else np.zeros((0, 3)))
     cv2.imwrite(str(dm_root / "landmarks_topdown.png"), top)
 
+    xyz_cam0 = _world_positions_to_cam0(ds, xyz_world)
     bgr0 = read_image_bgr(ds.image_paths[0])
     und0, _ = _undistort_if_needed(bgr0, ds)
-    uv, z = project_cam0_to_uv_z(K, xyz)
+    uv, z = project_cam0_to_uv_z(K, xyz_cam0)
     mask = np.isfinite(uv[:, 0]) & (z > 1e-9)
     panel = estimated_depth_visualization(und0, uv[mask], z[mask])
     cv2.imwrite(str(dm_root / "sparse_depth_cam0.png"), panel)
@@ -117,14 +161,15 @@ def _write_snapshot(
     j: int,
 ) -> None:
     K = ds.calibration.K
-    xyz = desc_map.positions_cam0()
+    xyz_world = desc_map.positions_world()
+    xyz_cam0 = _world_positions_to_cam0(ds, xyz_world)
     stem = f"{step_idx:04d}_{i:03d}_{j:03d}"
-    top = project_points_topdown(xyz if xyz.shape[0] else np.zeros((0, 3)))
+    top = project_points_topdown(xyz_world if xyz_world.shape[0] else np.zeros((0, 3)))
     cv2.imwrite(str(iter_root / f"landmarks_topdown_{stem}.png"), top)
 
     bgr0 = read_image_bgr(ds.image_paths[0])
     und0, _ = _undistort_if_needed(bgr0, ds)
-    uv, z = project_cam0_to_uv_z(K, xyz)
+    uv, z = project_cam0_to_uv_z(K, xyz_cam0)
     mask = np.isfinite(uv[:, 0]) & (z > 1e-9)
     panel = estimated_depth_visualization(und0, uv[mask], z[mask])
     cv2.imwrite(str(iter_root / f"sparse_depth_cam0_{stem}.png"), panel)
