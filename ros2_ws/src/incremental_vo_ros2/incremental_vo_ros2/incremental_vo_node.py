@@ -250,8 +250,12 @@ class IncrementalVoNode(Node):
         self._cx_auto = float(self.get_parameter("camera_cx").get_parameter_value().double_value)
         self._cy_auto = float(self.get_parameter("camera_cy").get_parameter_value().double_value)
 
-        self._base_frame = self.get_parameter("base_frame").get_parameter_value().string_value
-        self._camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
+        self._base_frame = self._normalize_tf_frame(
+            self.get_parameter("base_frame").get_parameter_value().string_value
+        )
+        self._camera_frame = self._normalize_tf_frame(
+            self.get_parameter("camera_frame").get_parameter_value().string_value
+        )
         tf_period = self.get_parameter("tf_lookup_period_s").get_parameter_value().double_value
         self._tf_use_latest = (
             self.get_parameter("tf_use_latest_time").get_parameter_value().bool_value
@@ -429,6 +433,12 @@ class IncrementalVoNode(Node):
         self._tf_buffer: Buffer | None = None
         self._tf_message_count = 0
         self._tf_static_message_count = 0
+        self._tf_edges: set[tuple[str, str]] = set()
+        self._tf_static_edges: set[tuple[str, str]] = set()
+        self._tf_set_fail_count = 0
+        self._tf_static_summary_logged = False
+        self._latched_sensor_frame_id = ""
+        self._resolved_camera_frame = ""
 
         self._sparse_map_pub = None
         self._camera_pose_debug_pub = None
@@ -579,6 +589,14 @@ class IncrementalVoNode(Node):
         self._K = effective_K_from_calibration(cal)
         d_norm = 0.0 if cal.dist_coeffs is None else float(np.linalg.norm(cal.dist_coeffs))
         K = cal.K
+        sensor_frame = self._normalize_tf_frame(msg.header.frame_id)
+        if sensor_frame:
+            self._latched_sensor_frame_id = sensor_frame
+            if sensor_frame != self._camera_frame:
+                self.get_logger().info(
+                    f"CameraInfo header.frame_id={sensor_frame!r} "
+                    f"(config camera_frame={self._camera_frame!r})"
+                )
         self.get_logger().info(
             f"CameraInfo latched from {self._camera_info_topic!r}: "
             f"size={cal.image_size} model={msg.distortion_model!r} "
@@ -687,6 +705,9 @@ class IncrementalVoNode(Node):
 
     def _on_image(self, msg: Image) -> None:
         self._last_image_msg = msg
+        image_frame = self._normalize_tf_frame(msg.header.frame_id)
+        if image_frame and not self._latched_sensor_frame_id:
+            self._latched_sensor_frame_id = image_frame
         if not self._require_calibration_for_image(msg):
             return
         if self._last_odom is None:
@@ -751,6 +772,66 @@ class IncrementalVoNode(Node):
                 f"Image {msg.width}x{msg.height} encoding={msg.encoding} frame={msg.header.frame_id!r}"
             )
 
+    @staticmethod
+    def _normalize_tf_frame(name: str) -> str:
+        s = (name or "").strip()
+        if s.startswith("/"):
+            s = s[1:]
+        return s
+
+    def _record_tf_edges(self, transforms, *, static: bool) -> None:
+        for tr in transforms:
+            parent = self._normalize_tf_frame(tr.header.frame_id)
+            child = self._normalize_tf_frame(tr.child_frame_id)
+            if not parent or not child:
+                continue
+            edge = (parent, child)
+            self._tf_edges.add(edge)
+            if static:
+                self._tf_static_edges.add(edge)
+
+    def _log_tf_set_failure(self, tr, exc: TransformException) -> None:
+        if self._tf_set_fail_count >= 8:
+            return
+        self._tf_set_fail_count += 1
+        self.get_logger().warning(
+            f"TF buffer rejected {tr.header.frame_id!r} -> {tr.child_frame_id!r}: {exc}"
+        )
+
+    def _maybe_log_tf_static_summary(self) -> None:
+        if self._tf_static_summary_logged or self._tf_static_message_count < 3:
+            return
+        self._tf_static_summary_logged = True
+        edges = sorted(f"{p}->{c}" for p, c in self._tf_static_edges)
+        self.get_logger().info(
+            f"tf_static complete ({len(edges)} edges): {edges if edges else '(none recorded)'}"
+        )
+
+    def _camera_frame_candidates(self) -> list[str]:
+        cands: list[str] = []
+        for raw in (self._latched_sensor_frame_id, self._camera_frame):
+            n = self._normalize_tf_frame(raw)
+            if n and n not in cands:
+                cands.append(n)
+        for _parent, child in sorted(self._tf_edges):
+            if any(k in child for k in ("optical", "rgb_camera", "camera")):
+                if child not in cands:
+                    cands.append(child)
+        return cands or [self._camera_frame]
+
+    def _extrinsic_parent_candidates(self, msg: Odometry) -> list[str]:
+        out: list[str] = []
+        child = self._odom_child_frame_id(msg)
+        base = self._normalize_tf_frame(self._base_frame)
+        for parent in (child, base):
+            if parent and parent not in out:
+                out.append(parent)
+        cam_set = set(self._camera_frame_candidates())
+        for parent, child_frame in self._tf_edges:
+            if child_frame in cam_set and parent not in out:
+                out.append(parent)
+        return out
+
     def _init_tf_subscriptions(self) -> None:
         """Subscribe ``/tf`` + ``/tf_static`` with rosbag-compatible QoS (not default ``TransformListener``)."""
         self._tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
@@ -785,8 +866,9 @@ class IncrementalVoNode(Node):
         for tr in msg.transforms:
             try:
                 self._tf_buffer.set_transform(tr, "incremental_vo_ros2")
-            except TransformException:
-                pass
+            except TransformException as e:
+                self._log_tf_set_failure(tr, e)
+        self._record_tf_edges(msg.transforms, static=False)
         self._tf_message_count += 1
 
     def _on_tf_static_message(self, msg: TFMessage) -> None:
@@ -795,15 +877,19 @@ class IncrementalVoNode(Node):
         for tr in msg.transforms:
             try:
                 self._tf_buffer.set_transform_static(tr, "incremental_vo_ros2")
-            except TransformException:
+            except TransformException as e:
                 try:
                     self._tf_buffer.set_transform(tr, "incremental_vo_ros2")
-                except TransformException:
-                    pass
+                except TransformException as e2:
+                    self._log_tf_set_failure(tr, e2)
+                else:
+                    self._log_tf_set_failure(tr, e)
+        self._record_tf_edges(msg.transforms, static=True)
         self._tf_static_message_count += 1
         if self._tf_static_message_count == 1:
-            frames = [t.child_frame_id for t in msg.transforms]
+            frames = [self._normalize_tf_frame(t.child_frame_id) for t in msg.transforms]
             self.get_logger().info(f"tf_static latched ({len(frames)} transforms), e.g. {frames[:4]}")
+        self._maybe_log_tf_static_summary()
 
     def _tf_time_from_odom(self, msg: Odometry) -> Time:
         return self._tf_time_from_stamp(msg.header.stamp.sec, msg.header.stamp.nanosec)
@@ -830,8 +916,7 @@ class IncrementalVoNode(Node):
             self.get_logger().warning(message)
 
     def _odom_child_frame_id(self, msg: Odometry) -> str:
-        child = (msg.child_frame_id or "").strip()
-        return child
+        return self._normalize_tf_frame(msg.child_frame_id)
 
     def _lookup_transform_to_matrix(
         self,
@@ -839,6 +924,8 @@ class IncrementalVoNode(Node):
         child_frame: str,
         stamps: list[Time],
     ) -> np.ndarray | None:
+        parent_frame = self._normalize_tf_frame(parent_frame)
+        child_frame = self._normalize_tf_frame(child_frame)
         if self._tf_buffer is None or not parent_frame or not child_frame:
             return None
         for stamp in stamps:
@@ -868,34 +955,44 @@ class IncrementalVoNode(Node):
             stamps.append(self._tf_time_from_stamp(stamp_sec, stamp_nsec))
         return stamps
 
-    def _lookup_world_T_camera_direct(
+    def _lookup_world_T_camera_via_tf(
         self,
         msg: Odometry,
         stamps: list[Time],
-    ) -> np.ndarray | None:
-        """Full chain on ``/tf``: ``odom.header.frame_id`` ← ``camera_frame`` (matches RViz)."""
-        if not msg.header.frame_id:
-            return None
-        return self._lookup_transform_to_matrix(
-            msg.header.frame_id,
-            self._camera_frame,
-            stamps,
-        )
+    ) -> tuple[np.ndarray | None, str, str]:
+        """
+        Resolve optical ``world_T_camera`` using TF.
 
-    def _lookup_child_T_camera(
-        self,
-        msg: Odometry,
-        stamps: list[Time],
-    ) -> np.ndarray | None:
-        """Extrinsic only: odom ``child_frame_id`` ← ``camera_frame`` (composed with odom pose)."""
+        Returns ``(T, source, camera_frame)`` with source one of
+        ``tf_direct``, ``tf_compose``, ``tf_compose_via_base``, or ``tf_missing``.
+        """
+        world = self._normalize_tf_frame(msg.header.frame_id)
         child = self._odom_child_frame_id(msg)
-        if not child:
-            return None
-        return self._lookup_transform_to_matrix(
-            child,
-            self._camera_frame,
-            stamps,
-        )
+        world_T_child = odom_to_cam_to_world_T(msg)
+        base = self._normalize_tf_frame(self._base_frame)
+
+        for camera in self._camera_frame_candidates():
+            if world:
+                T_direct = self._lookup_transform_to_matrix(world, camera, stamps)
+                if T_direct is not None:
+                    return T_direct, "tf_direct", camera
+            if not child:
+                continue
+            for parent in self._extrinsic_parent_candidates(msg):
+                T_parent_cam = self._lookup_transform_to_matrix(parent, camera, stamps)
+                if T_parent_cam is None:
+                    continue
+                if parent == child:
+                    return world_T_child @ T_parent_cam, "tf_compose", camera
+                T_child_parent = self._lookup_transform_to_matrix(child, parent, stamps)
+                if T_child_parent is not None:
+                    src = (
+                        "tf_compose_via_base"
+                        if parent == base
+                        else "tf_compose"
+                    )
+                    return world_T_child @ T_child_parent @ T_parent_cam, src, camera
+        return None, "tf_missing", ""
 
     def _resolve_world_T_camera(
         self,
@@ -910,25 +1007,26 @@ class IncrementalVoNode(Node):
 
         Returns ``(T, source)`` with source one of:
         ``odom_raw``, ``odom_child_is_camera``, ``tf_direct``, ``tf_compose``,
-        ``odom_body_fallback``, ``tf_missing``.
+        ``tf_compose_via_base``, ``odom_body_fallback``, ``tf_missing``.
         """
         if not self._apply_tf_to_camera_pose or self._tf_buffer is None:
             return odom_to_cam_to_world_T(msg), "odom_raw"
         child = self._odom_child_frame_id(msg)
-        if child and child == self._camera_frame:
-            return odom_to_cam_to_world_T(msg), "odom_child_is_camera"
+        for camera in self._camera_frame_candidates():
+            if child and child == camera:
+                return odom_to_cam_to_world_T(msg), "odom_child_is_camera"
         stamps = self._tf_stamps_for_lookup(stamp_sec, stamp_nsec)
-        T_child_cam = self._lookup_child_T_camera(msg, stamps)
-        if T_child_cam is not None:
-            return odom_to_cam_to_world_T(msg) @ T_child_cam, "tf_compose"
-        T_direct = self._lookup_world_T_camera_direct(msg, stamps)
-        if T_direct is not None:
-            return T_direct, "tf_direct"
+        T, source, camera = self._lookup_world_T_camera_via_tf(msg, stamps)
+        if T is not None:
+            if camera:
+                self._resolved_camera_frame = camera
+            return T, source
         if not allow_odom_fallback:
             return None, "tf_missing"
         self._maybe_warn_tf(
-            f"TF {msg.header.frame_id!r} <- {self._camera_frame!r} and "
-            f"{child!r} <- {self._camera_frame!r} failed; using odom child pose (body frame)."
+            f"TF could not resolve optical pose (world={msg.header.frame_id!r}, "
+            f"odom_child={child!r}, camera_candidates={self._camera_frame_candidates()!r}); "
+            "using odom child pose (body frame)."
         )
         return odom_to_cam_to_world_T(msg), "odom_body_fallback"
 
@@ -937,11 +1035,24 @@ class IncrementalVoNode(Node):
         if now - self._last_tf_wait_log_time >= 5.0:
             self._last_tf_wait_log_time = now
             child = self._odom_child_frame_id(msg) or "?"
+            world = self._normalize_tf_frame(msg.header.frame_id)
+            cams = self._camera_frame_candidates()
+            cam_hint = cams[0] if cams else self._camera_frame
+            related = sorted(
+                f"{p}->{c}"
+                for p, c in self._tf_edges
+                if any(
+                    k in p or k in c
+                    for k in ("fcu", "camera", "rgb", "optical", "base", "local_origin")
+                )
+            )
+            edge_hint = related[:12] if related else ["(no camera/fcu edges seen yet)"]
             self.get_logger().info(
-                f"Waiting for TF {child!r} <- {self._camera_frame!r} "
-                f"(odom world={msg.header.frame_id!r}) before first keyframe. "
+                f"Waiting for optical TF (odom child={child!r} -> camera ~{cam_hint!r}, "
+                f"world={world!r}) before first keyframe. "
                 f"Received: /tf msgs={self._tf_message_count} /tf_static msgs="
                 f"{self._tf_static_message_count}. "
+                f"TF edges (sample): {edge_hint}. "
                 "If tf_static=0: restart bag from beginning (--clock) while this node runs."
             )
 
@@ -952,10 +1063,8 @@ class IncrementalVoNode(Node):
         if self._tf_static_volatile_qos and self._tf_static_message_count < 1:
             return False
         stamps = self._tf_stamps_for_lookup(msg.header.stamp.sec, msg.header.stamp.nanosec)
-        return (
-            self._lookup_child_T_camera(msg, stamps) is not None
-            or self._lookup_world_T_camera_direct(msg, stamps) is not None
-        )
+        T, _source, _camera = self._lookup_world_T_camera_via_tf(msg, stamps)
+        return T is not None
 
     def _world_T_camera_from_odom(
         self, msg: Odometry, *, allow_odom_fallback: bool = True
