@@ -37,6 +37,7 @@ from visualization_msgs.msg import Marker
 
 from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
 from incremental_vo_ros2.param_config import apply_config_to_argv
+from incremental_vo_ros2.camera_axes import apply_camera_axes_swap, camera_axes_swap_rotation
 from incremental_vo_ros2.support import (
     BufferedFrame,
     camera_info_to_calibration,
@@ -200,6 +201,8 @@ class IncrementalVoNode(Node):
         self.declare_parameter("tf_lookup_period_s", 0.0)
         self.declare_parameter("tf_use_latest_time", False)
         self.declare_parameter("tf_static_volatile_qos", True)
+        # Post-multiply on world_T_camera: cam +Z→body +X, +Y→body +Z, +X→body +Y (race bag / FCU).
+        self.declare_parameter("camera_axes_swap", "")
         self.declare_parameter("log_image_hz", 0.0)
 
         # Descriptor-based landmark fusion (replace-if-better descriptors + EMA position update).
@@ -263,6 +266,11 @@ class IncrementalVoNode(Node):
         self._tf_static_volatile_qos = (
             self.get_parameter("tf_static_volatile_qos").get_parameter_value().bool_value
         )
+        swap_name = self.get_parameter("camera_axes_swap").get_parameter_value().string_value
+        try:
+            self._camera_axes_swap_R = camera_axes_swap_rotation(swap_name)
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
         log_hz = self.get_parameter("log_image_hz").get_parameter_value().double_value
         self._image_log_interval_s = 1.0 / log_hz if log_hz > 0.0 else math.inf
         self._last_image_log_time = self.get_clock().now()
@@ -556,8 +564,13 @@ class IncrementalVoNode(Node):
             + (
                 f" | apply_tf_to_camera_pose={self._apply_tf_to_camera_pose}"
                 f" camera_frame={self._camera_frame!r}"
+                f" camera_axes_swap={self.get_parameter('camera_axes_swap').value!r}"
                 if self._apply_tf_to_camera_pose
-                else ""
+                else (
+                    f" | camera_axes_swap={self.get_parameter('camera_axes_swap').value!r}"
+                    if self._camera_axes_swap_R is not None
+                    else ""
+                )
             )
             + (
                 f" | keyframe_markers topic={self._keyframe_marker_topic!r} "
@@ -994,6 +1007,11 @@ class IncrementalVoNode(Node):
                     return world_T_child @ T_child_parent @ T_parent_cam, src, camera
         return None, "tf_missing", ""
 
+    def _apply_axes_swap_to_world_T(self, T: np.ndarray, source: str) -> tuple[np.ndarray, str]:
+        if self._camera_axes_swap_R is None:
+            return T, source
+        return apply_camera_axes_swap(T, self._camera_axes_swap_R), f"{source}_axis_swap"
+
     def _resolve_world_T_camera(
         self,
         msg: Odometry,
@@ -1010,17 +1028,19 @@ class IncrementalVoNode(Node):
         ``tf_compose_via_base``, ``odom_body_fallback``, ``tf_missing``.
         """
         if not self._apply_tf_to_camera_pose or self._tf_buffer is None:
-            return odom_to_cam_to_world_T(msg), "odom_raw"
+            return self._apply_axes_swap_to_world_T(odom_to_cam_to_world_T(msg), "odom_raw")
         child = self._odom_child_frame_id(msg)
         for camera in self._camera_frame_candidates():
             if child and child == camera:
-                return odom_to_cam_to_world_T(msg), "odom_child_is_camera"
+                return self._apply_axes_swap_to_world_T(
+                    odom_to_cam_to_world_T(msg), "odom_child_is_camera"
+                )
         stamps = self._tf_stamps_for_lookup(stamp_sec, stamp_nsec)
         T, source, camera = self._lookup_world_T_camera_via_tf(msg, stamps)
         if T is not None:
             if camera:
                 self._resolved_camera_frame = camera
-            return T, source
+            return self._apply_axes_swap_to_world_T(T, source)
         if not allow_odom_fallback:
             return None, "tf_missing"
         self._maybe_warn_tf(
@@ -1028,7 +1048,9 @@ class IncrementalVoNode(Node):
             f"odom_child={child!r}, camera_candidates={self._camera_frame_candidates()!r}); "
             "using odom child pose (body frame)."
         )
-        return odom_to_cam_to_world_T(msg), "odom_body_fallback"
+        return self._apply_axes_swap_to_world_T(
+            odom_to_cam_to_world_T(msg), "odom_body_fallback"
+        )
 
     def _maybe_log_waiting_for_tf(self, msg: Odometry) -> None:
         now = time.monotonic()
