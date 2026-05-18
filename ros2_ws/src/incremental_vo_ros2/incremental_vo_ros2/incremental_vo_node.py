@@ -31,7 +31,8 @@ from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
-from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
+from tf2_msgs.msg import TFMessage
+from tf2_ros import Buffer, TransformBroadcaster, TransformException
 from visualization_msgs.msg import Marker
 
 from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
@@ -111,6 +112,25 @@ def _sparse_map_qos() -> QoSProfile:
     )
 
 
+def _tf_rosbag_qos() -> QoSProfile:
+    """Volatile QoS — required for rosbag2 replay of ``/tf`` and ``/tf_static``."""
+    return QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=100,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.VOLATILE,
+    )
+
+
+def _tf_static_live_qos() -> QoSProfile:
+    return QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+
+
 class IncrementalVoNode(Node):
     """Distance-based keyframes, pluggable metric pose fusion, two-view sparse triangulation."""
 
@@ -179,6 +199,7 @@ class IncrementalVoNode(Node):
         self.declare_parameter("camera_frame", "uav1/stereo/left_optical")
         self.declare_parameter("tf_lookup_period_s", 0.0)
         self.declare_parameter("tf_use_latest_time", False)
+        self.declare_parameter("tf_static_volatile_qos", True)
         self.declare_parameter("log_image_hz", 0.0)
 
         # Descriptor-based landmark fusion (replace-if-better descriptors + EMA position update).
@@ -234,6 +255,9 @@ class IncrementalVoNode(Node):
         tf_period = self.get_parameter("tf_lookup_period_s").get_parameter_value().double_value
         self._tf_use_latest = (
             self.get_parameter("tf_use_latest_time").get_parameter_value().bool_value
+        )
+        self._tf_static_volatile_qos = (
+            self.get_parameter("tf_static_volatile_qos").get_parameter_value().bool_value
         )
         log_hz = self.get_parameter("log_image_hz").get_parameter_value().double_value
         self._image_log_interval_s = 1.0 / log_hz if log_hz > 0.0 else math.inf
@@ -403,7 +427,8 @@ class IncrementalVoNode(Node):
         self._persisted = False
         self._world_T_camera_raw: list[np.ndarray] = []
         self._tf_buffer: Buffer | None = None
-        self._tf_listener: TransformListener | None = None
+        self._tf_message_count = 0
+        self._tf_static_message_count = 0
 
         self._sparse_map_pub = None
         self._camera_pose_debug_pub = None
@@ -449,16 +474,12 @@ class IncrementalVoNode(Node):
         if subscribe_gt:
             self.create_subscription(Odometry, odom_gt_topic, self._on_odom_gt, _odom_qos())
 
-        # TF listener: required for ``apply_tf_to_camera_pose`` or periodic debug logging.
         if tf_period > 0.0 or self._apply_tf_to_camera_pose:
-            self._tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
-            self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
+            self._init_tf_subscriptions()
             if tf_period > 0.0:
                 self.create_timer(tf_period, self._on_tf_timer)
-        if self._apply_tf_to_camera_pose and self._tf_buffer is None:
-            self.get_logger().warning(
-                "apply_tf_to_camera_pose=true but TF listener failed to start; using odom pose as-is."
-            )
+        if self._apply_tf_to_camera_pose:
+            self._log_tf_startup_hints()
 
         self.get_logger().info(
             f"Run directory: {self._run_dir} | keyframe_distance_m={self._d} | "
@@ -730,6 +751,60 @@ class IncrementalVoNode(Node):
                 f"Image {msg.width}x{msg.height} encoding={msg.encoding} frame={msg.header.frame_id!r}"
             )
 
+    def _init_tf_subscriptions(self) -> None:
+        """Subscribe ``/tf`` + ``/tf_static`` with rosbag-compatible QoS (not default ``TransformListener``)."""
+        self._tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
+        tf_qos = _tf_rosbag_qos()
+        static_qos = tf_qos if self._tf_static_volatile_qos else _tf_static_live_qos()
+        self.create_subscription(TFMessage, "/tf", self._on_tf_message, tf_qos)
+        self.create_subscription(TFMessage, "/tf_static", self._on_tf_static_message, static_qos)
+        self.get_logger().info(
+            "TF subscriptions: /tf + /tf_static "
+            f"(static_qos={'volatile' if self._tf_static_volatile_qos else 'transient_local'})"
+        )
+
+    def _log_tf_startup_hints(self) -> None:
+        use_sim = False
+        try:
+            use_sim = bool(self.get_parameter("use_sim_time").value)
+        except Exception:
+            pass
+        if not use_sim:
+            self.get_logger().warning(
+                "apply_tf_to_camera_pose=true but use_sim_time is false. "
+                "For rosbag: play with --clock and run --ros-args -p use_sim_time:=true"
+            )
+        self.get_logger().info(
+            "Rosbag TF tip: start the bag from t=0 AFTER this node is running "
+            "(tf_static has only 3 msgs at bag start; volatile replay will not repeat them)."
+        )
+
+    def _on_tf_message(self, msg: TFMessage) -> None:
+        if self._tf_buffer is None:
+            return
+        for tr in msg.transforms:
+            try:
+                self._tf_buffer.set_transform(tr, "incremental_vo_ros2")
+            except TransformException:
+                pass
+        self._tf_message_count += 1
+
+    def _on_tf_static_message(self, msg: TFMessage) -> None:
+        if self._tf_buffer is None:
+            return
+        for tr in msg.transforms:
+            try:
+                self._tf_buffer.set_transform_static(tr, "incremental_vo_ros2")
+            except TransformException:
+                try:
+                    self._tf_buffer.set_transform(tr, "incremental_vo_ros2")
+                except TransformException:
+                    pass
+        self._tf_static_message_count += 1
+        if self._tf_static_message_count == 1:
+            frames = [t.child_frame_id for t in msg.transforms]
+            self.get_logger().info(f"tf_static latched ({len(frames)} transforms), e.g. {frames[:4]}")
+
     def _tf_time_from_odom(self, msg: Odometry) -> Time:
         return self._tf_time_from_stamp(msg.header.stamp.sec, msg.header.stamp.nanosec)
 
@@ -768,16 +843,30 @@ class IncrementalVoNode(Node):
             return None
         for stamp in stamps:
             try:
+                if not self._tf_buffer.can_transform(
+                    parent_frame,
+                    child_frame,
+                    stamp,
+                    timeout=Duration(seconds=1.0),
+                ):
+                    continue
                 t = self._tf_buffer.lookup_transform(
                     parent_frame,
                     child_frame,
                     stamp,
-                    timeout=Duration(seconds=0.25),
+                    timeout=Duration(seconds=0.5),
                 )
                 return transform_stamped_to_world_T(t)
             except TransformException:
                 continue
         return None
+
+    def _tf_stamps_for_lookup(self, stamp_sec: int, stamp_nsec: int) -> list[Time]:
+        """Prefer latest TF (rosbag); optionally also try odom/image stamp."""
+        stamps: list[Time] = [Time()]
+        if not self._tf_use_latest:
+            stamps.append(self._tf_time_from_stamp(stamp_sec, stamp_nsec))
+        return stamps
 
     def _lookup_world_T_camera_direct(
         self,
@@ -828,15 +917,13 @@ class IncrementalVoNode(Node):
         child = self._odom_child_frame_id(msg)
         if child and child == self._camera_frame:
             return odom_to_cam_to_world_T(msg), "odom_child_is_camera"
-        stamps = self._tf_lookup_stamps_from_time(
-            stamp_sec, stamp_nsec, allow_latest_fallback=True
-        )
-        T_direct = self._lookup_world_T_camera_direct(msg, stamps)
-        if T_direct is not None:
-            return T_direct, "tf_direct"
+        stamps = self._tf_stamps_for_lookup(stamp_sec, stamp_nsec)
         T_child_cam = self._lookup_child_T_camera(msg, stamps)
         if T_child_cam is not None:
             return odom_to_cam_to_world_T(msg) @ T_child_cam, "tf_compose"
+        T_direct = self._lookup_world_T_camera_direct(msg, stamps)
+        if T_direct is not None:
+            return T_direct, "tf_direct"
         if not allow_odom_fallback:
             return None, "tf_missing"
         self._maybe_warn_tf(
@@ -852,19 +939,22 @@ class IncrementalVoNode(Node):
             child = self._odom_child_frame_id(msg) or "?"
             self.get_logger().info(
                 f"Waiting for TF {child!r} <- {self._camera_frame!r} "
-                f"(odom world={msg.header.frame_id!r}) before first keyframe."
+                f"(odom world={msg.header.frame_id!r}) before first keyframe. "
+                f"Received: /tf msgs={self._tf_message_count} /tf_static msgs="
+                f"{self._tf_static_message_count}. "
+                "If tf_static=0: restart bag from beginning (--clock) while this node runs."
             )
 
     def _can_resolve_camera_pose_from_odom(self, msg: Odometry) -> bool:
         """True when TF can supply optical ``world_T_camera`` (full chain or extrinsic)."""
         if not self._apply_tf_to_camera_pose:
             return True
-        stamps = self._tf_lookup_stamps_from_time(
-            msg.header.stamp.sec, msg.header.stamp.nanosec, allow_latest_fallback=True
-        )
+        if self._tf_static_volatile_qos and self._tf_static_message_count < 1:
+            return False
+        stamps = self._tf_stamps_for_lookup(msg.header.stamp.sec, msg.header.stamp.nanosec)
         return (
-            self._lookup_world_T_camera_direct(msg, stamps) is not None
-            or self._lookup_child_T_camera(msg, stamps) is not None
+            self._lookup_child_T_camera(msg, stamps) is not None
+            or self._lookup_world_T_camera_direct(msg, stamps) is not None
         )
 
     def _world_T_camera_from_odom(

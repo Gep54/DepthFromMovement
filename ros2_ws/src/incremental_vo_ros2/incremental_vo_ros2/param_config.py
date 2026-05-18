@@ -59,6 +59,7 @@ KNOWN_PARAMETERS = frozenset(
         "camera_frame",
         "tf_lookup_period_s",
         "tf_use_latest_time",
+        "tf_static_volatile_qos",
         "log_image_hz",
         "feature_method",
         "feature_n_features",
