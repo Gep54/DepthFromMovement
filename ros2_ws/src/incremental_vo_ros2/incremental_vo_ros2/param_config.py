@@ -56,7 +56,6 @@ KNOWN_PARAMETERS = frozenset(
         "offline_dataset_image_prefix",
         "base_frame",
         "camera_frame",
-        "camera_axes_swap",
         "tf_lookup_period_s",
         "tf_use_latest_time",
         "tf_static_volatile_qos",
