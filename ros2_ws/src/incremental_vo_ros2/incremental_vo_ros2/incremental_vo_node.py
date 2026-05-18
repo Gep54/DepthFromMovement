@@ -728,56 +728,69 @@ class IncrementalVoNode(Node):
             self._last_tf_warn_time = now
             self.get_logger().warning(message)
 
+    def _odom_child_frame_id(self, msg: Odometry) -> str:
+        child = (msg.child_frame_id or "").strip()
+        return child
+
+    def _lookup_child_T_camera(
+        self, msg: Odometry, *, allow_latest_fallback: bool = True
+    ) -> np.ndarray | None:
+        """SE(3) mapping camera optical → odom ``child_frame_id`` (static / dynamic extrinsic on ``/tf``)."""
+        if self._tf_buffer is None:
+            return None
+        child = self._odom_child_frame_id(msg)
+        if not child:
+            return None
+        stamps: list[Time] = [self._tf_time_from_odom(msg)]
+        if allow_latest_fallback and not self._tf_use_latest:
+            stamps.append(Time())
+        for stamp in stamps:
+            try:
+                t = self._tf_buffer.lookup_transform(
+                    child,
+                    self._camera_frame,
+                    stamp,
+                    timeout=Duration(seconds=0.25),
+                )
+                return transform_stamped_to_world_T(t)
+            except TransformException:
+                continue
+        return None
+
     def _maybe_log_waiting_for_tf(self, msg: Odometry) -> None:
         now = time.monotonic()
         if now - self._last_tf_wait_log_time >= 5.0:
             self._last_tf_wait_log_time = now
+            child = self._odom_child_frame_id(msg) or "?"
             self.get_logger().info(
-                f"Waiting for TF {msg.header.frame_id!r} <- {self._camera_frame!r} "
-                "before first keyframe (apply_tf_to_camera_pose=true)."
+                f"Waiting for TF {child!r} <- {self._camera_frame!r} "
+                f"(odom world={msg.header.frame_id!r}) before first keyframe."
             )
 
     def _can_resolve_camera_pose_from_odom(self, msg: Odometry) -> bool:
-        """True when ``_world_T_camera_from_odom`` can use TF (required before first keyframe if apply_tf)."""
+        """True when extrinsic TF odom child → ``camera_frame`` is available."""
         if not self._apply_tf_to_camera_pose:
             return True
-        if self._tf_buffer is None or not msg.header.frame_id:
-            return False
-        try:
-            self._tf_buffer.lookup_transform(
-                msg.header.frame_id,
-                self._camera_frame,
-                self._tf_time_from_odom(msg),
-                timeout=Duration(seconds=0.25),
-            )
-            return True
-        except TransformException:
-            return False
+        return self._lookup_child_T_camera(msg) is not None
 
     def _world_T_camera_from_odom(
         self, msg: Odometry, *, allow_odom_fallback: bool = True
     ) -> np.ndarray | None:
-        """Metric camera→world; optionally compose odom child frame with TF to ``camera_frame``."""
+        """Metric camera→world: ``world_T_odom_child`` from odom × TF child→optical."""
         if not self._apply_tf_to_camera_pose or self._tf_buffer is None:
             return odom_to_cam_to_world_T(msg)
-        if not msg.header.frame_id:
-            return odom_to_cam_to_world_T(msg) if allow_odom_fallback else None
-        try:
-            t = self._tf_buffer.lookup_transform(
-                msg.header.frame_id,
-                self._camera_frame,
-                self._tf_time_from_odom(msg),
-                timeout=Duration(seconds=0.25),
-            )
-            return transform_stamped_to_world_T(t)
-        except TransformException as e:
+        T_child_cam = self._lookup_child_T_camera(msg)
+        if T_child_cam is None:
             if not allow_odom_fallback:
                 return None
+            child = self._odom_child_frame_id(msg) or "?"
             self._maybe_warn_tf(
-                f"TF {msg.header.frame_id!r} <- {self._camera_frame!r} failed ({e}); "
-                "using odom pose without extrinsic."
+                f"TF {child!r} <- {self._camera_frame!r} failed; "
+                "using odom pose without optical extrinsic."
             )
             return odom_to_cam_to_world_T(msg)
+        T_world_child = odom_to_cam_to_world_T(msg)
+        return T_world_child @ T_child_cam
 
     def _camera_pose_debug_parent_frame(self) -> str:
         if self._camera_pose_debug_frame_id:
