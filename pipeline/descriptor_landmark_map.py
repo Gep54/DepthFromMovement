@@ -109,21 +109,6 @@ class DescriptorLandmarkMap:
             return np.zeros((0, 3), dtype=np.float64)
         return np.stack([lm.position_world for lm in self.landmarks], axis=0)
 
-    def prune_beyond_range_world(self, max_range_m: float, anchor_xyz: np.ndarray) -> int:
-        """Drop landmarks with distance to ``anchor_xyz`` > ``max_range_m``; return count removed."""
-        if max_range_m <= 0.0 or not self.landmarks:
-            return 0
-        anchor = np.asarray(anchor_xyz, dtype=np.float64).reshape(3)
-        kept: list[DescriptorLandmark] = []
-        removed = 0
-        for lm in self.landmarks:
-            if distance_from_anchor(lm.position_world, anchor) > max_range_m:
-                removed += 1
-            else:
-                kept.append(lm)
-        self.landmarks = kept
-        return removed
-
     def _nearest_landmark(self, d_obs: np.ndarray) -> tuple[int, float, float]:
         """Return (index, best_distance, second_best_distance). ``index=-1`` if empty."""
         if not self.landmarks:
@@ -177,10 +162,15 @@ class DescriptorLandmarkMap:
         *,
         world_T_camera_raw: np.ndarray,
         world_T_drone_raw: np.ndarray,
+        world_T_camera_j_raw: np.ndarray,
         max_range_world: float | None = None,
         spatial_merge_radius_m: float | None = None,
     ) -> None:
-        """Ingest triangulated points; camera→drone→world transform after cheirality."""
+        """Ingest triangulated points; camera→drone→world transform after cheirality.
+
+        Range gate (if ``max_range_world`` is set) uses distance to the **second** view
+        (``frame_j`` / ``world_T_camera_j_raw`` translation), not the first.
+        """
         if tw.descriptors is None or tw.descriptors.shape[0] == 0:
             return
         n = tw.X_world_h.shape[1]
@@ -190,7 +180,8 @@ class DescriptorLandmarkMap:
             )
         W_cam = np.asarray(world_T_camera_raw, dtype=np.float64)
         W_drone = np.asarray(world_T_drone_raw, dtype=np.float64)
-        anchor = W_cam[:3, 3].copy()
+        W_cam_j = np.asarray(world_T_camera_j_raw, dtype=np.float64)
+        range_anchor = W_cam_j[:3, 3].copy()
         radius = (
             spatial_merge_radius_m
             if spatial_merge_radius_m is not None
@@ -204,7 +195,7 @@ class DescriptorLandmarkMap:
             if X_cam is None:
                 continue
             X_world = point_camera_to_drone_to_world(X_cam, W_cam, W_drone)
-            if max_range_world is not None and distance_from_anchor(X_world, anchor) > max_range_world:
+            if max_range_world is not None and distance_from_anchor(X_world, range_anchor) > max_range_world:
                 continue
             d_obs = tw.descriptors[k]
 

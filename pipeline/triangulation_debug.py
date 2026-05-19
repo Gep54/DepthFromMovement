@@ -30,13 +30,15 @@ def valid_integrate_indices(
     *,
     world_T_camera_raw: np.ndarray,
     world_T_drone_raw: np.ndarray,
+    world_T_camera_j_raw: np.ndarray,
     max_range_world: float | None,
 ) -> list[int]:
     """Column indices that would pass ``DescriptorLandmarkMap.integrate`` ingest gates."""
     n = tw.X_world_h.shape[1]
     W_cam = np.asarray(world_T_camera_raw, dtype=np.float64)
     W_drone = np.asarray(world_T_drone_raw, dtype=np.float64)
-    anchor = W_cam[:3, 3].copy()
+    W_cam_j = np.asarray(world_T_camera_j_raw, dtype=np.float64)
+    range_anchor = W_cam_j[:3, 3].copy()
     valid: list[int] = []
     for k in range(n):
         if not tw.cheiral_mask[k]:
@@ -45,7 +47,7 @@ def valid_integrate_indices(
         if X_cam is None:
             continue
         X_world = point_camera_to_drone_to_world(X_cam, W_cam, W_drone)
-        if max_range_world is not None and distance_from_anchor(X_world, anchor) > max_range_world:
+        if max_range_world is not None and distance_from_anchor(X_world, range_anchor) > max_range_world:
             continue
         valid.append(k)
     return valid
@@ -97,6 +99,7 @@ def sample_random_integrate_point(
     *,
     world_T_camera_raw: np.ndarray,
     world_T_drone_raw: np.ndarray,
+    world_T_camera_j_raw: np.ndarray,
     max_range_world: float | None,
     rng: np.random.Generator | None = None,
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray] | None:
@@ -105,6 +108,7 @@ def sample_random_integrate_point(
         tw,
         world_T_camera_raw=world_T_camera_raw,
         world_T_drone_raw=world_T_drone_raw,
+        world_T_camera_j_raw=world_T_camera_j_raw,
         max_range_world=max_range_world,
     )
     if not valid:

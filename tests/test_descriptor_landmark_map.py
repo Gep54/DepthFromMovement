@@ -65,8 +65,8 @@ def test_ema_default_matches_incremental_mean() -> None:
     m = DescriptorLandmarkMap(cfg)
     W_cam, W_drone = _identity_poses()
     d = np.zeros((1, 32), dtype=np.uint8)
-    m.integrate(_tw_from_z(2.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
-    m.integrate(_tw_from_z(8.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
+    m.integrate(_tw_from_z(2.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
+    m.integrate(_tw_from_z(8.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
     np.testing.assert_allclose(m.landmarks[0].position_world[2], 5.0)
 
 
@@ -75,8 +75,8 @@ def test_fixed_merge_beta_differs_from_mean() -> None:
     m = DescriptorLandmarkMap(cfg)
     W_cam, W_drone = _identity_poses()
     d = np.ones((1, 32), dtype=np.uint8)
-    m.integrate(_tw_from_z(2.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
-    m.integrate(_tw_from_z(8.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
+    m.integrate(_tw_from_z(2.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
+    m.integrate(_tw_from_z(8.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
     np.testing.assert_allclose(m.landmarks[0].position_world[2], 3.5)
 
 
@@ -85,13 +85,14 @@ def test_replace_if_better_updates_prototype() -> None:
     m = DescriptorLandmarkMap(cfg)
     W_cam, W_drone = _identity_poses()
     proto = np.zeros((1, 32), dtype=np.uint8)
-    m.integrate(_tw_from_z(2.0, proto), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
+    m.integrate(_tw_from_z(2.0, proto), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
     stored = m.landmarks[0].descriptor.copy()
     alt = np.ones((1, 32), dtype=np.uint8)
     m.integrate(
         _tw_from_z(3.0, alt, frame_i=1),
         world_T_camera_raw=W_cam,
         world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam,
     )
     assert np.any(stored != m.landmarks[0].descriptor)
 
@@ -117,8 +118,8 @@ def test_spatial_gate_rejects_distant_descriptor_match() -> None:
     m = DescriptorLandmarkMap(cfg)
     W_cam, W_drone = _identity_poses()
     d = np.zeros((32,), dtype=np.uint8)
-    m.integrate(_tw_single_point(2.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
-    m.integrate(_tw_single_point(10.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
+    m.integrate(_tw_single_point(2.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
+    m.integrate(_tw_single_point(10.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
     assert len(m.landmarks) == 2
 
 
@@ -132,8 +133,8 @@ def test_spatial_gate_allows_near_descriptor_match() -> None:
     m = DescriptorLandmarkMap(cfg)
     W_cam, W_drone = _identity_poses()
     d = np.zeros((32,), dtype=np.uint8)
-    m.integrate(_tw_single_point(2.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
-    m.integrate(_tw_single_point(2.5, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
+    m.integrate(_tw_single_point(2.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
+    m.integrate(_tw_single_point(2.5, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
     assert len(m.landmarks) == 1
     np.testing.assert_allclose(m.landmarks[0].position_world[2], 2.25)
 
@@ -189,29 +190,45 @@ def test_integrate_max_range_world_skips_far_points() -> None:
         tw_points(2.0, 200.0),
         world_T_camera_raw=W_cam,
         world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam,
         max_range_world=50.0,
     )
     assert len(m.landmarks) == 1
     np.testing.assert_allclose(m.landmarks[0].position_world[2], 2.0)
 
 
-def test_prune_beyond_range_world() -> None:
-    cfg = DescriptorMapConfig(method="ORB", merge_beta=None, max_match_distance=8.0)
+def test_integrate_max_range_world_uses_frame_j_anchor() -> None:
+    cfg = DescriptorMapConfig(method="ORB", merge_beta=None, max_match_distance=256.0)
     m = DescriptorLandmarkMap(cfg)
-    W_cam, W_drone = _identity_poses()
-    anchor = np.zeros(3, dtype=np.float64)
-
-    def tw(z: float, desc_byte: int) -> TwoViewResult:
-        d = np.full((1, 32), desc_byte, dtype=np.uint8)
-        return _tw_from_z(z, d[0])
-
-    m.integrate(tw(2.0, 0), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
-    m.integrate(tw(80.0, 255), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
-    assert len(m.landmarks) == 2
-    removed = m.prune_beyond_range_world(50.0, anchor)
-    assert removed == 1
+    W_cam_i, W_drone = _identity_poses()
+    W_cam_j = np.eye(4, dtype=np.float64)
+    W_cam_j[:3, 3] = [100.0, 0.0, 0.0]
+    d = np.zeros((1, 32), dtype=np.uint8)
+    # World point (2, 0, 0): close to camera i, far from camera j at x=100.
+    tw_near_i = _tw_from_z(2.0, d)
+    tw_near_i.X_cam_h[:3, 0] = [2.0, 0.0, 0.0]
+    tw_near_i.X_world_h = tw_near_i.X_cam_h.copy()
+    m.integrate(
+        tw_near_i,
+        world_T_camera_raw=W_cam_i,
+        world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam_j,
+        max_range_world=10.0,
+    )
+    assert len(m.landmarks) == 0
+    # World point (101, 0, 0): ~1 m from camera j.
+    tw_near_j = _tw_from_z(2.0, d)
+    tw_near_j.X_cam_h[:3, 0] = [101.0, 0.0, 0.0]
+    tw_near_j.X_world_h = tw_near_j.X_cam_h.copy()
+    m.integrate(
+        tw_near_j,
+        world_T_camera_raw=W_cam_i,
+        world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam_j,
+        max_range_world=10.0,
+    )
     assert len(m.landmarks) == 1
-    np.testing.assert_allclose(m.landmarks[0].position_world[2], 2.0)
+    np.testing.assert_allclose(m.landmarks[0].position_world[0], 101.0)
 
 
 def test_point_camera_to_drone_to_world_with_offset_camera() -> None:
@@ -228,7 +245,7 @@ def test_export_landmarks_csv_roundtrip(tmp_path: Path) -> None:
     m = DescriptorLandmarkMap(cfg)
     W_cam, W_drone = _identity_poses()
     d = np.full((1, 32), 7, dtype=np.uint8)
-    m.integrate(_tw_from_z(3.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone)
+    m.integrate(_tw_from_z(3.0, d), world_T_camera_raw=W_cam, world_T_drone_raw=W_drone, world_T_camera_j_raw=W_cam)
     outp = tmp_path / "lm.csv"
     export_landmarks_csv(outp, m)
     text = outp.read_text(encoding="utf-8")

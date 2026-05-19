@@ -168,7 +168,7 @@ class IncrementalVoNode(Node):
         self.declare_parameter("sparse_map_topic", "sparse_map")
         self.declare_parameter("sparse_map_publish_period_s", 1.0)
         self.declare_parameter("sparse_map_frame_id", "")
-        self.declare_parameter("sparse_map_max_range_baseline_factor", 100.0)
+        self.declare_parameter("sparse_map_max_range_baseline_factor", 20.0)
         self.declare_parameter("save_run_on_shutdown", False)
 
         # Offline dataset export (``load_dataset`` / ``dfm-export-steps``-ready layout).
@@ -1272,19 +1272,12 @@ class IncrementalVoNode(Node):
         self._publish_keyframe_z_marker(idx, bf.cam_to_world, bf.stamp_sec, bf.stamp_nsec)
 
         max_range_world: float | None = None
-        cam_anchor = self._world_T_camera_raw[idx][:3, 3].copy()
         if idx >= 1 and len(self._world_T_camera) > idx:
             baseline_m = consecutive_keyframe_baseline_m(
                 self._world_T_camera[idx - 1], self._world_T_camera[idx]
             )
             self._last_consecutive_baseline_m = baseline_m
             max_range_world = max_sparse_range_m(baseline_m, self._sparse_map_range_factor)
-            if max_range_world is not None and self._desc_map is not None:
-                pruned = self._desc_map.prune_beyond_range_world(max_range_world, cam_anchor)
-                self.get_logger().info(
-                    f"Sparse range gate keyframe {idx}: baseline={baseline_m:.4f} m "
-                    f"max_range_world={max_range_world:.4f} m pruned={pruned}"
-                )
 
         if idx >= 1 and self._inc_map is not None:
             for off in range(1, min(self._pair_lookback, idx) + 1):
@@ -1303,6 +1296,7 @@ class IncrementalVoNode(Node):
                                 tw,
                                 world_T_camera_raw=self._world_T_camera_raw[i],
                                 world_T_drone_raw=self._world_T_drone_raw[i],
+                                world_T_camera_j_raw=self._world_T_camera_raw[idx],
                                 max_range_world=max_range_world,
                                 spatial_merge_radius_m=self._d,
                             )
@@ -1327,6 +1321,7 @@ class IncrementalVoNode(Node):
                             frame_i=i,
                             world_T_camera_raw=self._world_T_camera_raw[i],
                             world_T_drone_raw=self._world_T_drone_raw[i],
+                            world_T_camera_j_raw=self._world_T_camera_raw[idx],
                             max_range_world=max_range_world,
                         )
                 except Exception as e:
@@ -1340,6 +1335,7 @@ class IncrementalVoNode(Node):
         frame_i: int,
         world_T_camera_raw: np.ndarray,
         world_T_drone_raw: np.ndarray,
+        world_T_camera_j_raw: np.ndarray,
         max_range_world: float | None,
     ) -> None:
         from pipeline.triangulation_debug import (
@@ -1351,6 +1347,7 @@ class IncrementalVoNode(Node):
             tw,
             world_T_camera_raw=world_T_camera_raw,
             world_T_drone_raw=world_T_drone_raw,
+            world_T_camera_j_raw=world_T_camera_j_raw,
             max_range_world=max_range_world,
         )
         if sampled is None:

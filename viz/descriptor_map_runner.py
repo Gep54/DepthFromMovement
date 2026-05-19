@@ -113,10 +113,12 @@ def run_descriptor_landmark_pipeline(
             features_j=frame_cache[j],
         )
         W_i = ds.world_T_camera[i]
+        W_j = ds.world_T_camera[j]
         desc_map.integrate(
             tw,
             world_T_camera_raw=W_i,
             world_T_drone_raw=W_i,
+            world_T_camera_j_raw=W_j,
             spatial_merge_radius_m=desc_cfg.spatial_merge_radius_m,
         )
         if save_iter_viz:

@@ -63,6 +63,7 @@ def test_valid_integrate_indices_filters_cheiral_finite_range() -> None:
         tw,
         world_T_camera_raw=W_cam,
         world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam,
         max_range_world=10.0,
     )
     assert valid == [0]
@@ -97,6 +98,7 @@ def test_sample_random_integrate_point_deterministic_with_rng() -> None:
         tw,
         world_T_camera_raw=W,
         world_T_drone_raw=W,
+        world_T_camera_j_raw=W,
         max_range_world=None,
         rng=rng,
     )
@@ -105,6 +107,7 @@ def test_sample_random_integrate_point_deterministic_with_rng() -> None:
         tw,
         world_T_camera_raw=W,
         world_T_drone_raw=W,
+        world_T_camera_j_raw=W,
         max_range_world=None,
         rng=rng2,
     )
