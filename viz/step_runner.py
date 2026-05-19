@@ -437,7 +437,6 @@ def export_sequence_consecutive_pairs(
     _log_progress(
         f"dfm-export-steps: {n} frames, {n_pairs} pairs (lookback={wl}) -> {root.resolve()}"
     )
-    _log_progress("dfm-export-steps: computing per-frame features …")
     audit_records: list[dict] = []
     epipolar_views: list[EpipolarPairView] = []
     for pair_idx, (i, j) in enumerate(pairs, start=1):
