@@ -3,9 +3,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
 from data.dataset import load_dataset
 from viz.match_classification import classify_match_rejections
-from viz.recorder import GEOMETRY_STEP_ORDER, PAIR_STEP_ORDER, SINGLE_STEP_ORDER, ensure_step_pngs_exist
+from viz.recorder import (
+    DETAIL_PAIR_STEP_ORDER,
+    GEOMETRY_STEP_ORDER,
+    MINIMAL_GEOMETRY_STEP_ORDER,
+    MINIMAL_PAIR_STEP_ORDER,
+    PAIR_STEP_ORDER,
+    SINGLE_STEP_ORDER,
+    ensure_step_pngs_exist,
+)
 from viz.step_runner import (
     export_all_stages,
     export_sequence_consecutive_pairs,
@@ -19,24 +29,41 @@ def test_iter_sequence_pairs_counts() -> None:
     assert len(iter_sequence_pairs(5, 10)) == 10
 
 
-def test_export_all_step_pngs(mini_dataset_dir: Path, tmp_path: Path) -> None:
+def test_export_minimal_step_pngs(mini_dataset_dir: Path, tmp_path: Path) -> None:
     ds = load_dataset(mini_dataset_dir)
-    run_dir = tmp_path / "run1"
+    run_dir = tmp_path / "run_minimal"
     export_all_stages(ds, run_dir, i=0, j=1)
     paths = ensure_step_pngs_exist(run_dir, include_geometry=True)
-    expected = len(SINGLE_STEP_ORDER) + len(PAIR_STEP_ORDER) + len(GEOMETRY_STEP_ORDER)
+    expected = len(MINIMAL_PAIR_STEP_ORDER) + len(MINIMAL_GEOMETRY_STEP_ORDER)
     assert len(paths) == expected
 
     audit = run_dir / "rejection_audit.jsonl"
     assert audit.is_file()
-    lines = audit.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 1
-    rec = json.loads(lines[0])
-    assert rec["i"] == 0 and rec["j"] == 1
-    assert "counts" in rec
+    pairs_json = run_dir / "summary" / "pairs_all_rejection_types.json"
+    assert pairs_json.is_file()
 
     export_all_stages(ds, tmp_path / "run_no_geom", i=0, j=1, include_geometry=False)
     ensure_step_pngs_exist(tmp_path / "run_no_geom", include_geometry=False)
+
+
+def test_export_detail_log_adds_rejection_panels(mini_dataset_dir: Path, tmp_path: Path) -> None:
+    ds = load_dataset(mini_dataset_dir)
+    run_dir = tmp_path / "run_detail"
+    export_all_stages(ds, run_dir, i=0, j=1, detail_log=True)
+    paths = ensure_step_pngs_exist(run_dir, include_geometry=True, detail_log=True)
+    expected = len(MINIMAL_PAIR_STEP_ORDER) + len(DETAIL_PAIR_STEP_ORDER) + len(MINIMAL_GEOMETRY_STEP_ORDER)
+    assert len(paths) == expected
+    for slug in DETAIL_PAIR_STEP_ORDER:
+        assert any(slug in str(p) for p in paths)
+
+
+def test_export_full_steps(mini_dataset_dir: Path, tmp_path: Path) -> None:
+    ds = load_dataset(mini_dataset_dir)
+    run_dir = tmp_path / "run_full"
+    export_all_stages(ds, run_dir, i=0, j=1, full_steps=True)
+    paths = ensure_step_pngs_exist(run_dir, include_geometry=True, full_steps=True)
+    expected = len(SINGLE_STEP_ORDER) + len(PAIR_STEP_ORDER) + len(GEOMETRY_STEP_ORDER)
+    assert len(paths) == expected
 
 
 def test_no_cheiral_keeps_more_inliers_than_default(mini_dataset_dir: Path) -> None:
@@ -54,12 +81,8 @@ def test_no_cheiral_keeps_more_inliers_than_default(mini_dataset_dir: Path) -> N
     m_off = IncrementalMap(cfg=MapConfig(check_cheiral=False), feat_cfg=ds.feature_config, K=K, world_T_camera=wt)
     tw_off = m_off.add_frame_pair(0, 1, g_i, g_j)
 
-    cls_on = classify_match_rejections(
-        tw_on, K, wt[0], wt[1], check_cheiral=True
-    )
-    cls_off = classify_match_rejections(
-        tw_off, K, wt[0], wt[1], check_cheiral=False
-    )
+    cls_on = classify_match_rejections(tw_on, check_cheiral=True)
+    cls_off = classify_match_rejections(tw_off, check_cheiral=False)
     assert int(cls_off.cheiral.sum()) == 0
     assert int(cls_off.inlier.sum()) >= int(cls_on.inlier.sum())
     if tw_on.X_world_h.shape[1] > 0:
@@ -84,15 +107,38 @@ def test_classify_match_rejections_exclusive(mini_dataset_dir: Path) -> None:
         world_T_camera=ds.world_T_camera,
     )
     tw = m.add_frame_pair(0, 1, g_i, g_j)
-    cls = classify_match_rejections(
-        tw, ds.calibration.K, ds.world_T_camera[0], ds.world_T_camera[1], reproj_thresh_px=3.0
-    )
+    cls = classify_match_rejections(tw)
     n = len(tw.pts1)
     if n > 0:
-        total = cls.epipolar | cls.cheiral | cls.reproj | cls.inlier
+        total = cls.epipolar | cls.cheiral | cls.inlier
         assert total.sum() == n
         assert not (cls.epipolar & cls.cheiral).any()
-        assert not (cls.inlier & cls.reproj).any()
+        assert not (cls.inlier & cls.cheiral).any()
+
+
+def test_export_epipolar_pdfs(mini_dataset_dir: Path, tmp_path: Path) -> None:
+    ds = load_dataset(mini_dataset_dir)
+    run_dir = tmp_path / "run_epi"
+    export_all_stages(ds, run_dir, i=0, j=1, export_epipolar=True)
+    epi_dir = run_dir / "epipolar"
+    for name in (
+        "all_pairs_epilines.pdf",
+        "worst_epipolar_5.pdf",
+        "best_epipolar_5.pdf",
+    ):
+        p = epi_dir / name
+        assert p.is_file(), f"missing {p}"
+        assert p.stat().st_size > 100
+
+
+def test_export_epipolar_pdfs_sequence(mini_dataset_dir: Path, tmp_path: Path) -> None:
+    ds = load_dataset(mini_dataset_dir)
+    run_root = tmp_path / "seq_epi"
+    export_sequence_consecutive_pairs(ds, run_root, pair_lookback=10, export_epipolar=True)
+    epi_dir = run_root / "epipolar"
+    assert (epi_dir / "all_pairs_epilines.pdf").is_file()
+    assert (epi_dir / "worst_epipolar_5.pdf").is_file()
+    assert (epi_dir / "best_epipolar_5.pdf").is_file()
 
 
 def test_export_sequence_consecutive_pairs(mini_dataset_dir: Path, tmp_path: Path) -> None:

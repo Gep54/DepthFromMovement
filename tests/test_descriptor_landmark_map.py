@@ -53,7 +53,6 @@ def test_ema_default_matches_incremental_mean() -> None:
             scale_ok=True,
             X_world_h=X,
             cheiral_mask=np.array([True]),
-            reproj={},
             descriptors=d.copy(),
         )
 
@@ -85,7 +84,6 @@ def test_fixed_merge_beta_differs_from_mean() -> None:
             scale_ok=True,
             X_world_h=X,
             cheiral_mask=np.array([True]),
-            reproj={},
             descriptors=d.copy(),
         )
 
@@ -116,7 +114,6 @@ def test_replace_if_better_updates_prototype() -> None:
         scale_ok=True,
         X_world_h=proto_obs,
         cheiral_mask=np.array([True]),
-        reproj={},
         descriptors=proto.copy(),
     )
     m.integrate(tw1, W0)
@@ -138,7 +135,6 @@ def test_replace_if_better_updates_prototype() -> None:
         scale_ok=True,
         X_world_h=alt_obs,
         cheiral_mask=np.array([True]),
-        reproj={},
         descriptors=alt.copy(),
     )
     m.integrate(tw2, W0)
@@ -173,7 +169,6 @@ def _tw_single_point(z: float, descriptor: np.ndarray) -> TwoViewResult:
         scale_ok=True,
         X_world_h=X,
         cheiral_mask=np.array([True]),
-        reproj={},
         descriptors=descriptor.reshape(1, -1).copy(),
     )
 
@@ -247,7 +242,6 @@ def test_integrate_max_range_cam0_skips_far_points() -> None:
             scale_ok=True,
             X_world_h=X,
             cheiral_mask=np.array([True, True]),
-            reproj={},
             descriptors=d.copy(),
         )
 
@@ -279,7 +273,6 @@ def test_prune_beyond_range_cam0() -> None:
             scale_ok=True,
             X_world_h=X,
             cheiral_mask=np.array([True]),
-            reproj={},
             descriptors=d,
         )
 
@@ -313,7 +306,6 @@ def test_export_landmarks_csv_roundtrip(tmp_path: Path) -> None:
         scale_ok=True,
         X_world_h=X,
         cheiral_mask=np.array([True]),
-        reproj={},
         descriptors=d,
     )
     m.integrate(tw, W0)

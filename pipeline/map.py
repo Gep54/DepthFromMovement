@@ -16,9 +16,6 @@ from pipeline.geometry import (
 from pipeline.matching import match_pair_points
 from pipeline.triangulation import triangulate_cam1_frame, cam1_to_world_points
 from pipeline.features import FrameFeatures, detect_and_compute
-from pipeline.metrics import reprojection_errors, summarize_reprojection
-
-
 @dataclass
 class MapConfig:
     """Two-view geometry: RANSAC essential + vision rotation/direction, odometry translation norm only."""
@@ -43,8 +40,6 @@ class TwoViewResult:
     scale_ok: bool
     X_world_h: np.ndarray
     cheiral_mask: np.ndarray
-    reproj: dict[str, float]
-    """Rows aligned with columns of ``X_world_h`` (inlier correspondences); invalid rows ignored."""
     descriptors: np.ndarray | None = None
 
 
@@ -103,7 +98,6 @@ class IncrementalMap:
                 scale_ok=False,
                 X_world_h=empty,
                 cheiral_mask=np.zeros((0,), bool),
-                reproj={},
                 descriptors=None,
             )
 
@@ -140,7 +134,6 @@ class IncrementalMap:
                 scale_ok=False,
                 X_world_h=empty_h,
                 cheiral_mask=np.zeros((0,), bool),
-                reproj={},
                 descriptors=(
                     np.empty((0, desc_inlier.shape[1]), dtype=desc_inlier.dtype)
                     if desc_inlier.shape[1] > 0
@@ -168,9 +161,6 @@ class IncrementalMap:
         else:
             n_cols = X_h.shape[1]
             cheiral = np.ones(n_cols, dtype=bool) if n_cols else cheiral
-        err1 = reprojection_errors(X_h, pts1_i, self.K, Wi)
-        err2 = reprojection_errors(X_h, pts2_i, self.K, Wj)
-        reproj = summarize_reprojection(err1, err2)
 
         res = TwoViewResult(
             frame_i=i,
@@ -185,7 +175,6 @@ class IncrementalMap:
             scale_ok=scale_ok,
             X_world_h=X_h,
             cheiral_mask=cheiral,
-            reproj=reproj,
             descriptors=desc_inlier,
         )
         self.pair_results.append(res)

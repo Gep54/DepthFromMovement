@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Sequence
 
 import cv2
 import numpy as np
@@ -517,7 +517,6 @@ def draw_matches_masked(
 # BGR colors for match rejection categories (thesis figures).
 MATCH_COLOR_EPIPOLAR = (0, 0, 255)
 MATCH_COLOR_CHEIRAL = (0, 128, 255)
-MATCH_COLOR_REPROJ = (255, 0, 255)
 MATCH_COLOR_INLIER = (0, 255, 0)
 
 
@@ -529,14 +528,12 @@ def draw_classified_matches(
     *,
     epipolar: np.ndarray,
     cheiral: np.ndarray,
-    reproj: np.ndarray,
     inlier: np.ndarray,
 ) -> np.ndarray:
     out, w1 = _match_canvas(img1, img2)
     categories = (
         (epipolar, MATCH_COLOR_EPIPOLAR),
         (cheiral, MATCH_COLOR_CHEIRAL),
-        (reproj, MATCH_COLOR_REPROJ),
         (inlier, MATCH_COLOR_INLIER),
     )
     for mask, col in categories:
@@ -560,6 +557,93 @@ def _draw_epiline_on_image(canvas: np.ndarray, a: float, b: float, c: float, col
     y0 = int(-(a * x0 + c) / b)
     y1 = int(-(a * x1 + c) / b)
     cv2.line(canvas, (x0, y0), (x1, y1), color, thickness, cv2.LINE_AA)
+
+
+# Distinct BGR colours for highlighting up to five correspondence pairs in epipolar PDFs.
+EPIPOLAR_HIGHLIGHT_COLORS: tuple[tuple[int, int, int], ...] = (
+    (0, 0, 255),
+    (0, 200, 255),
+    (0, 255, 0),
+    (255, 0, 255),
+    (255, 128, 0),
+)
+
+
+def symmetric_epipolar_distances(
+    pts1: np.ndarray,
+    pts2: np.ndarray,
+    F: np.ndarray,
+) -> np.ndarray:
+    """Per-match symmetric point-to-epiline distance in pixels (mean of both images)."""
+    p1 = np.asarray(pts1, dtype=np.float64).reshape(-1, 2)
+    p2 = np.asarray(pts2, dtype=np.float64).reshape(-1, 2)
+    if p1.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float64)
+    lines2 = cv2.computeCorrespondEpilines(p1.reshape(-1, 1, 2), 1, F).reshape(-1, 3)
+    lines1 = cv2.computeCorrespondEpilines(p2.reshape(-1, 1, 2), 2, F).reshape(-1, 3)
+    d2 = np.abs(lines2[:, 0] * p2[:, 0] + lines2[:, 1] * p2[:, 1] + lines2[:, 2])
+    n2 = np.hypot(lines2[:, 0], lines2[:, 1]) + 1e-12
+    d1 = np.abs(lines1[:, 0] * p1[:, 0] + lines1[:, 1] * p1[:, 1] + lines1[:, 2])
+    n1 = np.hypot(lines1[:, 0], lines1[:, 1]) + 1e-12
+    return 0.5 * (d1 / n1 + d2 / n2)
+
+
+def draw_matches_with_bilateral_epilines(
+    img1: np.ndarray,
+    img2: np.ndarray,
+    pts1: np.ndarray,
+    pts2: np.ndarray,
+    F: np.ndarray,
+    *,
+    match_indices: np.ndarray | None = None,
+    colors: Sequence[tuple[int, int, int]] | None = None,
+    default_color: tuple[int, int, int] = (0, 255, 255),
+    line_thickness: int = 1,
+    point_radius: int = 3,
+) -> np.ndarray:
+    """
+    Side-by-side mosaic with epilines on **both** images and match segments drawn.
+
+    When ``match_indices`` and ``colors`` are set, each listed match uses ``colors[r]``.
+  Otherwise every match uses ``default_color``.
+    """
+    p1 = np.asarray(pts1, dtype=np.float64).reshape(-1, 2)
+    p2 = np.asarray(pts2, dtype=np.float64).reshape(-1, 2)
+    n = p1.shape[0]
+    if n == 0:
+        return _match_canvas(img1, img2)[0]
+
+    if match_indices is None:
+        idx = np.arange(n, dtype=np.int32)
+        use_colors = [default_color] * n
+    else:
+        idx = np.asarray(match_indices, dtype=np.int32).reshape(-1)
+        if colors is None:
+            use_colors = [default_color] * len(idx)
+        else:
+            use_colors = list(colors)
+
+    left = img1.copy()
+    right = img2.copy()
+    lines2_all = cv2.computeCorrespondEpilines(p1.reshape(-1, 1, 2), 1, F).reshape(-1, 3)
+    lines1_all = cv2.computeCorrespondEpilines(p2.reshape(-1, 1, 2), 2, F).reshape(-1, 3)
+
+    for rank, k in enumerate(idx):
+        col = use_colors[rank % len(use_colors)]
+        a, b, c = lines2_all[k]
+        _draw_epiline_on_image(right, float(a), float(b), float(c), col, line_thickness)
+        a, b, c = lines1_all[k]
+        _draw_epiline_on_image(left, float(a), float(b), float(c), col, line_thickness)
+
+    out, w1 = _match_canvas(left, right)
+    for rank, k in enumerate(idx):
+        col = use_colors[rank % len(use_colors)]
+        pt1 = (int(p1[k, 0]), int(p1[k, 1]))
+        pt2 = (int(p2[k, 0]) + w1, int(p2[k, 1]))
+        cv2.line(out, pt1, pt2, col, line_thickness, cv2.LINE_AA)
+        cv2.circle(out, pt1, point_radius, col, -1, cv2.LINE_AA)
+        cv2.circle(out, pt2, point_radius, col, -1, cv2.LINE_AA)
+    return out
 
 
 def draw_epipolar_outliers_with_lines(

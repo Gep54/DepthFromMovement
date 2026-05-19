@@ -767,7 +767,7 @@ class IncrementalVoNode(Node):
                     n_desc = len(self._desc_map.landmarks) if self._desc_map is not None else 0
                     self.get_logger().info(
                         f"Two-view {i}->{idx}: triangulated cols={tw.X_world_h.shape[1]} "
-                        f"descriptor_landmarks_total={n_desc} reproj={tw.reproj!r}"
+                        f"descriptor_landmarks_total={n_desc}"
                     )
                 except Exception as e:
                     self.get_logger().error(f"add_frame_pair failed for ({i}->{idx}): {e}")

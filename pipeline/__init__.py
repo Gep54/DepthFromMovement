@@ -21,7 +21,6 @@ from pipeline.descriptor_landmark_map import (
     world_point_to_cam0,
 )
 from pipeline.fusion import FusedLandmarkMap, FusedLandmark, fused_world_points_homogeneous
-from pipeline.metrics import reprojection_errors, summarize_reprojection
 from pipeline.metric_fusion import (
     create_metric_pose_fusion,
     fuse_pose_sequence,
@@ -57,8 +56,6 @@ __all__ = [
     "export_landmarks_csv",
     "world_point_to_cam0",
     "fused_world_points_homogeneous",
-    "reprojection_errors",
-    "summarize_reprojection",
     "create_metric_pose_fusion",
     "fuse_pose_sequence",
     "fused_pose_from_pair",

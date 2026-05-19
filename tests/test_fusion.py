@@ -28,7 +28,6 @@ def _tw(
         scale_ok=True,
         X_world_h=X_world_h,
         cheiral_mask=cheiral,
-        reproj={},
     )
 
 

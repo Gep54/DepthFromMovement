@@ -18,7 +18,6 @@ SINGLE_STEP_ORDER: tuple[str, ...] = (
 PAIR_STEP_ORDER: tuple[str, ...] = (
     "raw_input",
     "matches",
-    "epipolar_outliers_epilines",
     "match_classifications",
     "inliers",
 )
@@ -28,6 +27,20 @@ GEOMETRY_STEP_ORDER: tuple[str, ...] = (
     "estimated_depth",
     "depth_error",
 )
+
+# Default ``dfm-export-steps`` output (minimal per pair).
+MINIMAL_PAIR_STEP_ORDER: tuple[str, ...] = (
+    "matches",
+    "match_classifications",
+    "inliers",
+)
+
+DETAIL_PAIR_STEP_ORDER: tuple[str, ...] = (
+    "rejected_epipolar",
+    "rejected_cheiral",
+)
+
+MINIMAL_GEOMETRY_STEP_ORDER: tuple[str, ...] = ("estimated_depth",)
 
 # Legacy flat order (deprecated); kept for imports that reference STEP_ORDER.
 STEP_ORDER: tuple[str, ...] = SINGLE_STEP_ORDER + PAIR_STEP_ORDER + GEOMETRY_STEP_ORDER
@@ -39,10 +52,9 @@ _SUBDIR_ORDERS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _index_for(subdir: str, slug: str) -> int:
-    order = _SUBDIR_ORDERS[subdir]
+def _index_for(order: tuple[str, ...], slug: str) -> int:
     if slug not in order:
-        raise KeyError(f"unknown step {slug!r} for subdir {subdir!r}; expected one of {order}")
+        raise KeyError(f"unknown step {slug!r}; expected one of {order}")
     return order.index(slug) + 1
 
 
@@ -52,11 +64,23 @@ class PipelineRecorder:
     Filenames are ``{idx:02d}_{slug}.png`` for stable ordering.
     """
 
-    def __init__(self, run_root: str | Path, *, subdir: str = "") -> None:
+    def __init__(
+        self,
+        run_root: str | Path,
+        *,
+        subdir: str = "",
+        slug_order: tuple[str, ...] | None = None,
+    ) -> None:
         self.run_root = Path(run_root)
         self.subdir = subdir.strip("/\\")
         if self.subdir and self.subdir not in _SUBDIR_ORDERS:
             raise ValueError(f"unknown subdir {self.subdir!r}; expected one of {sorted(_SUBDIR_ORDERS)}")
+        if slug_order is not None:
+            self._slug_order = slug_order
+        elif self.subdir:
+            self._slug_order = _SUBDIR_ORDERS[self.subdir]
+        else:
+            self._slug_order = ()
         self.steps_dir = self.run_root / "steps"
         if self.subdir:
             self.steps_dir = self.steps_dir / self.subdir
@@ -65,7 +89,7 @@ class PipelineRecorder:
     def path_for(self, slug: str) -> Path:
         if not self.subdir:
             raise ValueError("path_for(slug) requires a subdir-specific PipelineRecorder")
-        idx = _index_for(self.subdir, slug)
+        idx = _index_for(self._slug_order, slug)
         return self.steps_dir / f"{idx:02d}_{slug}.png"
 
     def write(self, slug: str, image_bgr: np.ndarray) -> Path:
@@ -87,20 +111,52 @@ class PipelineRecorder:
         return self.write(slug, payload["image_bgr"])
 
 
+def pair_slug_orders(*, full_steps: bool = False, detail_log: bool = False) -> tuple[str, ...]:
+    """Ordered pair slugs for the active export profile."""
+    if full_steps:
+        order: tuple[str, ...] = PAIR_STEP_ORDER
+    else:
+        order = MINIMAL_PAIR_STEP_ORDER
+    if detail_log:
+        order = order + DETAIL_PAIR_STEP_ORDER
+    return order
+
+
+def geometry_slug_order(*, full_steps: bool = False) -> tuple[str, ...]:
+    return GEOMETRY_STEP_ORDER if full_steps else MINIMAL_GEOMETRY_STEP_ORDER
+
+
 def ensure_step_pngs_exist(
     run_dir: str | Path,
     *,
     include_geometry: bool = True,
+    full_steps: bool = False,
+    detail_log: bool = False,
 ) -> list[Path]:
-    """Verify illustration (+ optional geometry) stage files are present."""
+    """Verify exported stage PNGs for the active profile."""
     root = Path(run_dir)
     paths: list[Path] = []
-    for sub, order in _SUBDIR_ORDERS.items():
-        if sub == "geometry" and not include_geometry:
-            continue
-        rec = PipelineRecorder(root, subdir=sub)
-        for slug in order:
-            p = rec.path_for(slug)
+    if full_steps:
+        rec_single = PipelineRecorder(root, subdir="single")
+        for slug in SINGLE_STEP_ORDER:
+            p = rec_single.path_for(slug)
+            if not p.is_file():
+                raise FileNotFoundError(f"missing step PNG: {p}")
+            paths.append(p)
+
+    pair_order = pair_slug_orders(full_steps=full_steps, detail_log=detail_log)
+    rec_pair = PipelineRecorder(root, subdir="pair", slug_order=pair_order)
+    for slug in pair_order:
+        p = rec_pair.path_for(slug)
+        if not p.is_file():
+            raise FileNotFoundError(f"missing step PNG: {p}")
+        paths.append(p)
+
+    if include_geometry:
+        geom_order = geometry_slug_order(full_steps=full_steps)
+        rec_geom = PipelineRecorder(root, subdir="geometry", slug_order=geom_order)
+        for slug in geom_order:
+            p = rec_geom.path_for(slug)
             if not p.is_file():
                 raise FileNotFoundError(f"missing step PNG: {p}")
             paths.append(p)

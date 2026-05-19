@@ -19,10 +19,12 @@ from viz.match_classification import (
     classify_match_rejections,
     write_pairs_all_rejection_types,
 )
+from viz.epipolar_report import EpipolarPairView, export_epipolar_pdf_bundle
 from viz.overlays import (
+    MATCH_COLOR_CHEIRAL,
+    MATCH_COLOR_EPIPOLAR,
     canny_edges_bgr,
     draw_classified_matches,
-    draw_epipolar_outliers_with_lines,
     draw_matches,
     draw_rich_keypoints,
     estimated_depth_visualization,
@@ -32,7 +34,13 @@ from viz.overlays import (
     render_trajectory_topdown,
     sparse_depth_error_heatmap,
 )
-from viz.recorder import PipelineRecorder, ensure_step_pngs_exist as _ensure_step_pngs_exist
+from viz.match_classification import MatchClassification
+from viz.recorder import (
+    PipelineRecorder,
+    geometry_slug_order,
+    pair_slug_orders,
+    ensure_step_pngs_exist as _ensure_step_pngs_exist,
+)
 
 
 def _undistort_if_needed(bgr: np.ndarray, ds: Dataset) -> tuple[np.ndarray, np.ndarray]:
@@ -53,6 +61,31 @@ def _undistort_if_needed(bgr: np.ndarray, ds: Dataset) -> tuple[np.ndarray, np.n
 def fundamental_from_essential(E: np.ndarray, K: np.ndarray) -> np.ndarray:
     Kinv = np.linalg.inv(K)
     return Kinv.T @ E @ Kinv
+
+
+def epipolar_pair_view(
+    *,
+    i: int,
+    j: int,
+    und_i: np.ndarray,
+    und_j: np.ndarray,
+    tw: TwoViewResult,
+    K: np.ndarray,
+    world_T_camera: Sequence[np.ndarray],
+) -> EpipolarPairView:
+    E_viz = tw.E
+    if E_viz is None:
+        E_viz = essential_from_world_poses(world_T_camera[i], world_T_camera[j], K)
+    F = fundamental_from_essential(np.asarray(E_viz, dtype=np.float64), K)
+    return EpipolarPairView(
+        frame_i=i,
+        frame_j=j,
+        und_i=und_i,
+        und_j=und_j,
+        pts1=tw.pts1,
+        pts2=tw.pts2,
+        F=F,
+    )
 
 
 def iter_sequence_pairs(n_frames: int, pair_lookback: int) -> list[tuple[int, int]]:
@@ -92,6 +125,27 @@ def export_single_frame_stages(
     rec.write("descriptors", draw_rich_keypoints(und, kpi))
 
 
+def _write_rejection_detail_stages(
+    rec_pair: PipelineRecorder,
+    und_i: np.ndarray,
+    und_j: np.ndarray,
+    pts1: np.ndarray,
+    pts2: np.ndarray,
+    cls: MatchClassification,
+) -> None:
+    """One mosaic per rejection method (epipolar / cheiral)."""
+    panels = (
+        ("rejected_epipolar", cls.epipolar, MATCH_COLOR_EPIPOLAR),
+        ("rejected_cheiral", cls.cheiral, MATCH_COLOR_CHEIRAL),
+    )
+    for slug, mask, color in panels:
+        m = mask.reshape(-1).astype(bool)
+        if not np.any(m):
+            rec_pair.write(slug, np.hstack([und_i, und_j]))
+            continue
+        rec_pair.write(slug, draw_matches(und_i, und_j, pts1[m], pts2[m], color=color))
+
+
 def export_geometry_stages(
     ds: Dataset,
     pair_run_dir: str | Path,
@@ -100,9 +154,11 @@ def export_geometry_stages(
     j: int,
     tw: TwoViewResult,
     und_i: np.ndarray,
+    full_steps: bool = False,
 ) -> None:
-    """Write ``steps/geometry/`` triangulation and depth panels."""
-    rec = PipelineRecorder(pair_run_dir, subdir="geometry")
+    """Write ``steps/geometry/`` (minimal: estimated depth only; full: all panels)."""
+    geom_order = geometry_slug_order(full_steps=full_steps)
+    rec = PipelineRecorder(pair_run_dir, subdir="geometry", slug_order=geom_order)
     K = ds.calibration.K
     Wi = ds.world_T_camera[i]
     Wj = ds.world_T_camera[j]
@@ -122,11 +178,15 @@ def export_geometry_stages(
         v = int(x[1, 0] / (x[2, 0] + 1e-9))
         if 0 <= u < repro.shape[1] and 0 <= v < repro.shape[0]:
             cv2.circle(repro, (u, v), 3, (0, 128, 255), -1, cv2.LINE_AA)
-    tri_panel = np.hstack([repro, cv2.resize(scatter, (repro.shape[1], repro.shape[0]))])
-    rec.write("triangulation", tri_panel)
+    if full_steps:
+        tri_panel = np.hstack([repro, cv2.resize(scatter, (repro.shape[1], repro.shape[0]))])
+        rec.write("triangulation", tri_panel)
 
     uv_est, z_est = project_world_points_to_camera_uv_z(tw.X_world_h, tw.cheiral_mask, K, Wi)
     rec.write("estimated_depth", estimated_depth_visualization(und_i, uv_est, z_est))
+
+    if not full_steps:
+        return
 
     gt_depth = load_gt_depth_for_frame(ds, i)
     err_img = und_i.copy()
@@ -172,9 +232,11 @@ def export_single_pair_stages(
     reuse_two_view: TwoViewResult | None = None,
     frame_features_cache: Sequence[FrameFeatures] | None = None,
     include_geometry: bool = True,
-    reproj_thresh_px: float = 3.0,
     rejection_audit_path: str | Path | None = None,
     check_cheiral: bool = True,
+    full_steps: bool = False,
+    detail_log: bool = False,
+    export_epipolar: bool = False,
 ) -> dict:
     """
     Run the two-view pipeline for frames ``(i, j)`` and write illustration PNGs.
@@ -184,13 +246,14 @@ def export_single_pair_stages(
     feat_cfg = feat_cfg if feat_cfg is not None else ds.feature_config
     pair_root = Path(pair_run_dir)
 
-    export_single_frame_stages(
-        ds,
-        pair_root,
-        frame_idx=i,
-        feat_cfg=feat_cfg,
-        frame_features_cache=frame_features_cache,
-    )
+    if full_steps:
+        export_single_frame_stages(
+            ds,
+            pair_root,
+            frame_idx=i,
+            feat_cfg=feat_cfg,
+            frame_features_cache=frame_features_cache,
+        )
 
     bgr_i = read_image_bgr(ds.image_paths[i])
     bgr_j = read_image_bgr(ds.image_paths[j])
@@ -213,24 +276,14 @@ def export_single_pair_stages(
         tw = m.add_frame_pair(i, j, g_i, g_j, features_i=fi, features_j=fj)
 
     pts1, pts2 = tw.pts1, tw.pts2
-    rec_pair = PipelineRecorder(pair_root, subdir="pair")
+    pair_order = pair_slug_orders(full_steps=full_steps, detail_log=detail_log)
+    rec_pair = PipelineRecorder(pair_root, subdir="pair", slug_order=pair_order)
 
-    rec_pair.write("raw_input", np.hstack([und_i, und_j]))
+    if full_steps:
+        rec_pair.write("raw_input", np.hstack([und_i, und_j]))
     rec_pair.write("matches", draw_matches(und_i, und_j, pts1, pts2))
 
-    E_viz = tw.E
-    if E_viz is None:
-        E_viz = essential_from_world_poses(Wi, Wj, K)
-    F = fundamental_from_essential(np.asarray(E_viz, dtype=np.float64), K)
-
-    rec_pair.write(
-        "epipolar_outliers_epilines",
-        draw_epipolar_outliers_with_lines(und_i, und_j, pts1, pts2, F, tw.inlier_mask),
-    )
-
-    cls = classify_match_rejections(
-        tw, K, Wi, Wj, reproj_thresh_px=reproj_thresh_px, check_cheiral=check_cheiral
-    )
+    cls = classify_match_rejections(tw, check_cheiral=check_cheiral)
     rec_pair.write(
         "match_classifications",
         draw_classified_matches(
@@ -240,7 +293,6 @@ def export_single_pair_stages(
             pts2,
             epipolar=cls.epipolar,
             cheiral=cls.cheiral,
-            reproj=cls.reproj,
             inlier=cls.inlier,
         ),
     )
@@ -249,12 +301,23 @@ def export_single_pair_stages(
         draw_matches(und_i, und_j, pts1[cls.inlier], pts2[cls.inlier]),
     )
 
+    if detail_log:
+        _write_rejection_detail_stages(rec_pair, und_i, und_j, pts1, pts2, cls)
+
     record = audit_record(i, j, cls)
     if rejection_audit_path is not None:
         append_rejection_audit(rejection_audit_path, record)
 
     if include_geometry:
-        export_geometry_stages(ds, pair_root, i=i, j=j, tw=tw, und_i=und_i)
+        export_geometry_stages(
+            ds, pair_root, i=i, j=j, tw=tw, und_i=und_i, full_steps=full_steps
+        )
+
+    if export_epipolar:
+        export_epipolar_pdf_bundle(
+            pair_root,
+            [epipolar_pair_view(i=i, j=j, und_i=und_i, und_j=und_j, tw=tw, K=K, world_T_camera=ds.world_T_camera)],
+        )
 
     return record
 
@@ -268,9 +331,11 @@ def export_all_stages(
     feat_cfg: FeatureConfig | None = None,
     frame_features_cache: Sequence[FrameFeatures] | None = None,
     include_geometry: bool = True,
-    reproj_thresh_px: float = 3.0,
     rejection_audit_path: str | Path | None = None,
     check_cheiral: bool = True,
+    full_steps: bool = False,
+    detail_log: bool = False,
+    export_epipolar: bool = False,
 ) -> dict:
     """Single pair ``(i, j)`` into ``run_dir/steps/{single,pair,geometry}/``."""
     audit_path = rejection_audit_path if rejection_audit_path is not None else Path(run_dir) / "rejection_audit.jsonl"
@@ -284,15 +349,15 @@ def export_all_stages(
         feat_cfg=feat_cfg,
         frame_features_cache=frame_features_cache,
         include_geometry=include_geometry,
-        reproj_thresh_px=reproj_thresh_px,
         rejection_audit_path=audit_path,
         check_cheiral=check_cheiral,
+        full_steps=full_steps,
+        detail_log=detail_log,
+        export_epipolar=export_epipolar,
     )
-    if record.get("has_all_rejection_types"):
-        write_pairs_all_rejection_types(
-            Path(run_dir) / "summary" / "pairs_all_rejection_types.json",
-            [record],
-        )
+    summary_dir = Path(run_dir) / "summary"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    write_pairs_all_rejection_types(summary_dir / "pairs_all_rejection_types.json", [record])
     return record
 
 
@@ -304,9 +369,11 @@ def export_sequence_consecutive_pairs(
     fuse_merge_px: float = 4.0,
     pair_lookback: int = 10,
     include_geometry: bool = True,
-    reproj_thresh_px: float = 3.0,
     rejection_audit_path: str | Path | None = None,
     check_cheiral: bool = True,
+    full_steps: bool = False,
+    detail_log: bool = False,
+    export_epipolar: bool = False,
 ) -> list[tuple[int, int]]:
     """
     For each frame index ``j`` from ``1`` to ``n-1``, pair it with frames
@@ -359,6 +426,7 @@ def export_sequence_consecutive_pairs(
 
     pairs = iter_sequence_pairs(n, wl)
     audit_records: list[dict] = []
+    epipolar_views: list[EpipolarPairView] = []
     for i, j in pairs:
         tw = inc.add_frame_pair(
             i,
@@ -370,6 +438,22 @@ def export_sequence_consecutive_pairs(
         )
         fused.integrate_two_view_result(tw)
         pair_dir = pairs_root / f"{i:03d}_{j:03d}"
+        bgr_i = read_image_bgr(ds.image_paths[i])
+        bgr_j = read_image_bgr(ds.image_paths[j])
+        und_i, _ = _undistort_if_needed(bgr_i, ds)
+        und_j, _ = _undistort_if_needed(bgr_j, ds)
+        if export_epipolar:
+            epipolar_views.append(
+                epipolar_pair_view(
+                    i=i,
+                    j=j,
+                    und_i=und_i,
+                    und_j=und_j,
+                    tw=tw,
+                    K=ds.calibration.K,
+                    world_T_camera=ds.world_T_camera,
+                )
+            )
         record = export_single_pair_stages(
             ds,
             pair_dir,
@@ -379,11 +463,16 @@ def export_sequence_consecutive_pairs(
             reuse_two_view=tw,
             frame_features_cache=frame_cache,
             include_geometry=include_geometry,
-            reproj_thresh_px=reproj_thresh_px,
             rejection_audit_path=audit_path,
             check_cheiral=check_cheiral,
+            full_steps=full_steps,
+            detail_log=detail_log,
+            export_epipolar=False,
         )
         audit_records.append(record)
+
+    if export_epipolar and epipolar_views:
+        export_epipolar_pdf_bundle(root, epipolar_views)
 
     write_pairs_all_rejection_types(summary_root / "pairs_all_rejection_types.json", audit_records)
 
@@ -443,12 +532,19 @@ def ensure_sequence_outputs_exist(
     pair_lookback: int = 10,
     *,
     include_geometry: bool = True,
+    full_steps: bool = False,
+    detail_log: bool = False,
 ) -> None:
     """Check pair step PNGs, trajectory summary, fused-landmark summaries, and audit file."""
     root = Path(run_dir)
     wl = max(1, int(pair_lookback))
     for i, j in iter_sequence_pairs(n_frames, wl):
-        ensure_step_pngs_exist(root / "pairs" / f"{i:03d}_{j:03d}", include_geometry=include_geometry)
+        ensure_step_pngs_exist(
+            root / "pairs" / f"{i:03d}_{j:03d}",
+            include_geometry=include_geometry,
+            full_steps=full_steps,
+            detail_log=detail_log,
+        )
     sf = root / "summary" / "trajectory_topdown_full_sequence.png"
     if not sf.is_file():
         raise FileNotFoundError(f"missing sequence summary: {sf}")
@@ -464,10 +560,32 @@ def ensure_sequence_outputs_exist(
         raise FileNotFoundError(f"missing pairs summary: {pairs_json}")
 
 
-def ensure_step_pngs_exist(run_dir: str | Path, *, include_geometry: bool = True) -> list[Path]:
-    """Verify every documented stage file is present."""
-    return _ensure_step_pngs_exist(run_dir, include_geometry=include_geometry)
+def ensure_step_pngs_exist(
+    run_dir: str | Path,
+    *,
+    include_geometry: bool = True,
+    full_steps: bool = False,
+    detail_log: bool = False,
+) -> list[Path]:
+    """Verify stage PNGs for the active export profile."""
+    return _ensure_step_pngs_exist(
+        run_dir,
+        include_geometry=include_geometry,
+        full_steps=full_steps,
+        detail_log=detail_log,
+    )
 
 
-def ensure_all_step_pngs_exist(run_dir: str | Path, *, include_geometry: bool = True) -> list[Path]:
-    return _ensure_step_pngs_exist(run_dir, include_geometry=include_geometry)
+def ensure_all_step_pngs_exist(
+    run_dir: str | Path,
+    *,
+    include_geometry: bool = True,
+    full_steps: bool = False,
+    detail_log: bool = False,
+) -> list[Path]:
+    return ensure_step_pngs_exist(
+        run_dir,
+        include_geometry=include_geometry,
+        full_steps=full_steps,
+        detail_log=detail_log,
+    )

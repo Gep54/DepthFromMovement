@@ -38,18 +38,27 @@ def main() -> None:
     p.add_argument(
         "--no-geometry-stages",
         action="store_true",
-        help="Skip triangulation / estimated depth / depth error under steps/geometry/",
+        help="Skip estimated depth under steps/geometry/ (default writes geometry/01_estimated_depth.png only)",
+    )
+    p.add_argument(
+        "--detail-log",
+        action="store_true",
+        help="Per pair: add pair/rejected_epipolar and rejected_cheiral PNGs",
+    )
+    p.add_argument(
+        "--full-steps",
+        action="store_true",
+        help="Export all legacy step PNGs (single/, full pair/, triangulation, depth error)",
+    )
+    p.add_argument(
+        "--epipolar",
+        action="store_true",
+        help="Write run_dir/epipolar/ with three PDFs (all matches, worst 5, best 5 epipolar pairs)",
     )
     p.add_argument(
         "--no-cheiral",
         action="store_true",
         help="Do not reject triangulated points by camera-frame depth (Z > 1e-6); keep all epipolar inliers",
-    )
-    p.add_argument(
-        "--reproj-outlier-px",
-        type=float,
-        default=3.0,
-        help="Reprojection threshold (px) for match rejection colouring (default 3)",
     )
     p.add_argument(
         "--rejection-audit",
@@ -62,6 +71,9 @@ def main() -> None:
     include_geometry = not args.no_geometry_stages
     check_cheiral = not args.no_cheiral
     audit_path = args.rejection_audit
+    full_steps = args.full_steps
+    detail_log = args.detail_log
+    export_epipolar = args.epipolar
     if args.sequence:
         export_sequence_consecutive_pairs(
             ds,
@@ -69,15 +81,19 @@ def main() -> None:
             fuse_merge_px=args.fuse_merge_px,
             pair_lookback=args.pair_lookback,
             include_geometry=include_geometry,
-            reproj_thresh_px=args.reproj_outlier_px,
             rejection_audit_path=audit_path,
             check_cheiral=check_cheiral,
+            full_steps=full_steps,
+            detail_log=detail_log,
+            export_epipolar=export_epipolar,
         )
         ensure_sequence_outputs_exist(
             args.run_dir,
             len(ds.image_paths),
             pair_lookback=args.pair_lookback,
             include_geometry=include_geometry,
+            full_steps=full_steps,
+            detail_log=detail_log,
         )
     else:
         export_all_stages(
@@ -86,11 +102,18 @@ def main() -> None:
             i=args.i,
             j=args.j,
             include_geometry=include_geometry,
-            reproj_thresh_px=args.reproj_outlier_px,
             rejection_audit_path=audit_path,
             check_cheiral=check_cheiral,
+            full_steps=full_steps,
+            detail_log=detail_log,
+            export_epipolar=export_epipolar,
         )
-        ensure_all_step_pngs_exist(args.run_dir, include_geometry=include_geometry)
+        ensure_all_step_pngs_exist(
+            args.run_dir,
+            include_geometry=include_geometry,
+            full_steps=full_steps,
+            detail_log=detail_log,
+        )
 
 
 if __name__ == "__main__":
