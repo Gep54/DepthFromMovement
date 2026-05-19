@@ -9,21 +9,24 @@ from pipeline.config import FeatureConfig
 from pipeline.geometry import (
     essential_from_R_t,
     essential_from_world_poses,
-    recover_pose_from_essential,
     relative_motion_from_world_poses,
-    vision_rotation_odom_translation_scale,
 )
+
+_MOTION_BASELINE_EPS = 1e-9
 from pipeline.matching import match_pair_points
 from pipeline.triangulation import triangulate_cam1_frame, cam1_to_world_points
 from pipeline.features import FrameFeatures, detect_and_compute
 @dataclass
 class MapConfig:
-    """Two-view geometry: RANSAC essential + vision rotation/direction, odometry translation norm only."""
+    """Two-view geometry: RANSAC essential for match filtering; R,t from provided world poses."""
 
-    ransac_epipolar_thresh: float = 1.0
+    ransac_epipolar_thresh: float = 3.0
+    """RANSAC epipolar distance threshold (px); larger accepts more matches."""
     min_parallax_deg: float = 0.5
     check_cheiral: bool = True
     """If False, keep all triangulated epipolar inliers (no Z-depth rejection)."""
+    cheiral_min_z: float = -0.01
+    """Camera-frame Z must exceed this (metres) in both views when ``check_cheiral`` is on."""
 
 
 @dataclass
@@ -103,7 +106,7 @@ class IncrementalMap:
 
         Wi = self.world_T_camera[i]
         Wj = self.world_T_camera[j]
-        _, t_gt = relative_motion_from_world_poses(Wi, Wj)
+        R_motion, t_motion = relative_motion_from_world_poses(Wi, Wj)
 
         E_fm, mask = cv2.findEssentialMat(
             pts1,
@@ -144,16 +147,24 @@ class IncrementalMap:
         if pts1_i.shape[0] == 0:
             return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
 
-        E_fm33 = np.asarray(E_fm, dtype=np.float64).reshape(3, 3)
-        R_vis, t_vis, _ = recover_pose_from_essential(E_fm33, pts1_i, pts2_i, self.K, mask=None)
-        R_est, t_est, scale_ok, scale = vision_rotation_odom_translation_scale(R_vis, t_vis, t_gt)
+        R_est = R_motion
+        t_est = t_motion
+        baseline = float(np.linalg.norm(t_est))
+        scale_ok = baseline >= _MOTION_BASELINE_EPS
+        scale = baseline if scale_ok else 1.0
 
         if not scale_ok:
             return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
 
         E = essential_from_R_t(R_est, t_est)
         X_cam_h, cheiral = triangulate_cam1_frame(
-            pts1_i, pts2_i, self.K, R_est, t_est, check_cheiral=self.cfg.check_cheiral
+            pts1_i,
+            pts2_i,
+            self.K,
+            R_est,
+            t_est,
+            check_cheiral=self.cfg.check_cheiral,
+            min_z=self.cfg.cheiral_min_z,
         )
         X_h = cam1_to_world_points(X_cam_h, Wi)
         if self.cfg.check_cheiral:

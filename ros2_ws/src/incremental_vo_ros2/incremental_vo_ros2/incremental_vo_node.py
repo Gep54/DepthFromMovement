@@ -37,6 +37,7 @@ from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
 from incremental_vo_ros2.param_config import apply_config_to_argv
 from incremental_vo_ros2.support import (
     BufferedFrame,
+    OdomHistory,
     camera_info_to_calibration,
     consecutive_keyframe_baseline_m,
     copy_image_msg,
@@ -53,6 +54,7 @@ from incremental_vo_ros2.support import (
     should_buffer_image,
     transform_points_world_T_camera,
     effective_K_from_calibration,
+    world_T_camera_from_odom,
     world_T_camera_to_quaternion_xyzw,
 )
 
@@ -157,7 +159,8 @@ class IncrementalVoNode(Node):
         self.declare_parameter("offline_dataset_image_prefix", "frame")
         self.declare_parameter("offline_dataset_pose_source", "odom")
 
-        # Optional TF debug (off by default for rosbag-focused runs).
+        # TF: compose odometry child pose with extrinsics to the optical frame.
+        self.declare_parameter("apply_tf_to_camera_pose", True)
         self.declare_parameter("base_frame", "uav1/base_link")
         self.declare_parameter("camera_frame", "uav1/stereo/left_optical")
         self.declare_parameter("tf_lookup_period_s", 0.0)
@@ -212,6 +215,9 @@ class IncrementalVoNode(Node):
         self._cx_auto = float(self.get_parameter("camera_cx").get_parameter_value().double_value)
         self._cy_auto = float(self.get_parameter("camera_cy").get_parameter_value().double_value)
 
+        self._apply_tf_to_camera_pose = (
+            self.get_parameter("apply_tf_to_camera_pose").get_parameter_value().bool_value
+        )
         self._base_frame = self.get_parameter("base_frame").get_parameter_value().string_value
         self._camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
         tf_period = self.get_parameter("tf_lookup_period_s").get_parameter_value().double_value
@@ -339,6 +345,7 @@ class IncrementalVoNode(Node):
         self._K: np.ndarray | None = None
         self._last_camera_info_warn_time = 0.0
         self._last_odom: Odometry | None = None
+        self._odom_history = OdomHistory(maxlen=max(64, self._max_buf * 4))
         self._last_image_msg: Image | None = None
         self._buffer: list[BufferedFrame] = []
         self._world_T_camera: list[np.ndarray] = []
@@ -384,12 +391,16 @@ class IncrementalVoNode(Node):
         if subscribe_gt:
             self.create_subscription(Odometry, odom_gt_topic, self._on_odom_gt, _odom_qos())
 
-        # Only spin a TF listener when periodic lookups are enabled (avoids /tf subscription and
-        # TF_OLD_DATA noise during rosbag playback when extrinsics are not needed).
-        if tf_period > 0.0:
+        need_tf_listener = self._apply_tf_to_camera_pose or tf_period > 0.0
+        if need_tf_listener:
             self._tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
             self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
-            self.create_timer(tf_period, self._on_tf_timer)
+            if tf_period > 0.0:
+                self.create_timer(tf_period, self._on_tf_timer)
+        elif self._apply_tf_to_camera_pose:
+            self.get_logger().warning(
+                "apply_tf_to_camera_pose=true but TF listener could not be created."
+            )
 
         self.get_logger().info(
             f"Run directory: {self._run_dir} | keyframe_distance_m={self._d} | "
@@ -409,9 +420,13 @@ class IncrementalVoNode(Node):
                 )
             )
             + (
-                f" | TF debug {self._base_frame!r}<-{self._camera_frame!r} every {tf_period}s"
-                if tf_period > 0.0
-                else " | TF listener disabled (tf_lookup_period_s=0)"
+                f" | TF camera pose: apply_tf={self._apply_tf_to_camera_pose} "
+                f"camera_frame={self._camera_frame!r} use_latest={self._tf_use_latest}"
+                + (
+                    f" debug every {tf_period}s"
+                    if tf_period > 0.0
+                    else (" listener on" if need_tf_listener else " listener off")
+                )
             )
             + (
                 (
@@ -534,19 +549,63 @@ class IncrementalVoNode(Node):
             f"ratio_second_best={desc_cfg.ratio_second_best}"
         )
 
+    def _image_time(self, stamp_sec: int, stamp_nsec: int) -> Time:
+        if self._tf_use_latest:
+            return Time()
+        from builtin_interfaces.msg import Time as TimeMsg
+
+        return Time.from_msg(TimeMsg(sec=int(stamp_sec), nanosec=int(stamp_nsec)))
+
+    def _world_T_camera_from_odom_msg(
+        self, odom: Odometry, *, stamp_sec: int, stamp_nsec: int
+    ) -> np.ndarray:
+        stamp = self._image_time(stamp_sec, stamp_nsec)
+        return world_T_camera_from_odom(
+            odom,
+            self._tf_buffer,
+            camera_frame=self._camera_frame,
+            base_frame=self._base_frame,
+            stamp=stamp,
+            use_latest_tf=self._tf_use_latest,
+            apply_tf=self._apply_tf_to_camera_pose,
+        )
+
+    def _fused_world_T_camera(self, T_odom_cam: np.ndarray) -> np.ndarray:
+        if self._pose_fusion is None:
+            return T_odom_cam
+        ensure_pipeline_on_path()
+        from pipeline.metric_fusion.combine import fused_pose_from_pair
+
+        T_provided = getattr(self._pose_fusion, "_T_provided", None)
+        return fused_pose_from_pair(
+            T_odom_cam,
+            T_provided,
+            self._fusion_method_str,
+            position_blend_weight=self._fusion_position_blend_w,
+        )
+
+    def _metric_pose_at_image_stamp(
+        self, odom: Odometry, *, stamp_sec: int, stamp_nsec: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(fused world_T_camera, odom-only world_T_camera, metric xyz)``."""
+        T_odom = self._world_T_camera_from_odom_msg(
+            odom, stamp_sec=stamp_sec, stamp_nsec=stamp_nsec
+        )
+        T_fused = self._fused_world_T_camera(T_odom)
+        return T_fused, T_odom, T_fused[:3, 3].copy()
+
     def _fused_cam_to_world_and_pos(self) -> tuple[np.ndarray, np.ndarray]:
-        if self._pose_fusion is not None:
-            T = self._pose_fusion.fused_world_T_camera()
-            return T, T[:3, 3].copy()
         assert self._last_odom is not None
-        T = odom_to_cam_to_world_T(self._last_odom)
-        return T, odom_position_xyz(self._last_odom)
+        sec = int(self._last_odom.header.stamp.sec)
+        nsec = int(self._last_odom.header.stamp.nanosec)
+        T, _odom_T, pos = self._metric_pose_at_image_stamp(
+            self._last_odom, stamp_sec=sec, stamp_nsec=nsec
+        )
+        return T, pos
 
     def _current_metric_position(self) -> np.ndarray:
-        if self._pose_fusion is not None:
-            return self._pose_fusion.fused_position_xyz()
-        assert self._last_odom is not None
-        return odom_position_xyz(self._last_odom)
+        _, _, pos = self._fused_cam_to_world_and_pos()
+        return pos
 
     def _travel_fraction_since_last_kf(self) -> float | None:
         """``‖pos − last_kf‖ / keyframe_distance_m``; ``None`` if no keyframe committed yet."""
@@ -577,8 +636,16 @@ class IncrementalVoNode(Node):
             self._maybe_clear_buffer_for_fraction()
             self._maybe_log_image_throttle(msg)
             return
-        T, pos = self._fused_cam_to_world_and_pos()
-        odom_T = odom_to_cam_to_world_T(self._last_odom)
+        odom_msg = self._odom_history.nearest(
+            int(msg.header.stamp.sec), int(msg.header.stamp.nanosec)
+        )
+        if odom_msg is None:
+            odom_msg = self._last_odom
+        sec = int(msg.header.stamp.sec)
+        nsec = int(msg.header.stamp.nanosec)
+        T, odom_T, pos = self._metric_pose_at_image_stamp(
+            odom_msg, stamp_sec=sec, stamp_nsec=nsec
+        )
         qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T)
         bf = BufferedFrame(
             stamp_sec=msg.header.stamp.sec,
@@ -611,11 +678,14 @@ class IncrementalVoNode(Node):
 
     def _on_odom_main(self, msg: Odometry) -> None:
         self._last_odom = msg
+        self._odom_history.push(msg)
         if self._pose_fusion is not None:
-            T = odom_to_cam_to_world_T(msg)
-            self._pose_fusion.push_odom_world_T_camera(
-                T, (msg.header.stamp.sec, msg.header.stamp.nanosec)
+            sec = int(msg.header.stamp.sec)
+            nsec = int(msg.header.stamp.nanosec)
+            T_odom = self._world_T_camera_from_odom_msg(
+                msg, stamp_sec=sec, stamp_nsec=nsec
             )
+            self._pose_fusion.push_odom_world_T_camera(T_odom, (sec, nsec))
         self._maybe_clear_buffer_for_fraction()
         self._try_keyframe_selection()
 
@@ -659,6 +729,24 @@ class IncrementalVoNode(Node):
 
     def _commit_keyframe(self, bf: BufferedFrame, *, distance_trigger_m: float | None) -> None:
         from pipeline.geometry import canonicalize_world_T_camera_to_first
+
+        odom_msg = self._odom_history.nearest(bf.stamp_sec, bf.stamp_nsec)
+        if odom_msg is None and self._last_odom is not None:
+            odom_msg = self._last_odom
+        if odom_msg is not None:
+            T_fused, T_odom, pos = self._metric_pose_at_image_stamp(
+                odom_msg, stamp_sec=bf.stamp_sec, stamp_nsec=bf.stamp_nsec
+            )
+            bf.cam_to_world = T_fused
+            bf.odom_cam_to_world = T_odom
+            bf.pos_odom = pos
+            qx, qy, qz, qw = world_T_camera_to_quaternion_xyzw(T_fused)
+            bf.qx, bf.qy, bf.qz, bf.qw = float(qx), float(qy), float(qz), float(qw)
+
+        prev_spacing_m: float | None = None
+        if self._world_T_camera_raw:
+            prev_t = self._world_T_camera_raw[-1][:3, 3]
+            prev_spacing_m = float(np.linalg.norm(bf.pos_odom - prev_t))
 
         gray, k_eff = image_msg_to_gray_undistorted(bf.image_msg, self._calibration)
         if gray is None:
@@ -714,7 +802,9 @@ class IncrementalVoNode(Node):
                 "w": bf.qw,
             },
             "image_path": manifest_path.replace("\\", "/"),
-            "distance_from_previous_keyframe_m": distance_trigger_m,
+            "distance_from_previous_keyframe_m": (
+                prev_spacing_m if prev_spacing_m is not None else distance_trigger_m
+            ),
         }
         self._kf_records.append(rec)
         self._last_kf_pos = bf.pos_odom.copy()

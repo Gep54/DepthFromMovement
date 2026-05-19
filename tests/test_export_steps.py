@@ -34,7 +34,7 @@ def test_export_minimal_step_pngs(mini_dataset_dir: Path, tmp_path: Path) -> Non
     run_dir = tmp_path / "run_minimal"
     export_all_stages(ds, run_dir, i=0, j=1)
     paths = ensure_step_pngs_exist(run_dir, include_geometry=True)
-    expected = len(MINIMAL_PAIR_STEP_ORDER) + len(MINIMAL_GEOMETRY_STEP_ORDER)
+    expected = len(MINIMAL_PAIR_STEP_ORDER) + len(MINIMAL_GEOMETRY_STEP_ORDER) + 2  # pose_delta png+json
     assert len(paths) == expected
 
     audit = run_dir / "rejection_audit.jsonl"
@@ -49,7 +49,7 @@ def test_export_detail_log_adds_rejection_panels(mini_dataset_dir: Path, tmp_pat
     run_dir = tmp_path / "run_detail"
     export_all_stages(ds, run_dir, i=0, j=1, detail_log=True)
     paths = ensure_step_pngs_exist(run_dir, include_geometry=True, detail_log=True)
-    expected = len(MINIMAL_PAIR_STEP_ORDER) + len(DETAIL_PAIR_STEP_ORDER) + len(MINIMAL_GEOMETRY_STEP_ORDER)
+    expected = len(MINIMAL_PAIR_STEP_ORDER) + len(DETAIL_PAIR_STEP_ORDER) + len(MINIMAL_GEOMETRY_STEP_ORDER) + 2
     assert len(paths) == expected
     for slug in DETAIL_PAIR_STEP_ORDER:
         assert any(slug in str(p) for p in paths)
@@ -60,7 +60,7 @@ def test_export_full_steps(mini_dataset_dir: Path, tmp_path: Path) -> None:
     run_dir = tmp_path / "run_full"
     export_all_stages(ds, run_dir, i=0, j=1, full_steps=True)
     paths = ensure_step_pngs_exist(run_dir, include_geometry=True, full_steps=True)
-    expected = len(SINGLE_STEP_ORDER) + len(PAIR_STEP_ORDER) + len(GEOMETRY_STEP_ORDER)
+    expected = len(SINGLE_STEP_ORDER) + len(PAIR_STEP_ORDER) + len(GEOMETRY_STEP_ORDER) + 2
     assert len(paths) == expected
 
 
@@ -148,6 +148,9 @@ def test_export_sequence_consecutive_pairs(mini_dataset_dir: Path, tmp_path: Pat
 
     ensure_sequence_outputs_exist(run_root, n, pair_lookback=10)
     assert len(list((run_root / "pairs").iterdir())) == len(iter_sequence_pairs(n, 10))
+    pair0 = run_root / "pairs" / "000_001"
+    assert (pair0 / "pose_delta.png").is_file()
+    assert (pair0 / "pose_delta.json").is_file()
     assert (run_root / "rejection_audit.jsonl").is_file()
 
     run_b = tmp_path / "seq_run_lb1"

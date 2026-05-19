@@ -132,8 +132,11 @@ def ensure_step_pngs_exist(
     include_geometry: bool = True,
     full_steps: bool = False,
     detail_log: bool = False,
+    include_pose_delta: bool = True,
 ) -> list[Path]:
     """Verify exported stage PNGs for the active profile."""
+    from viz.pose_delta import POSE_DELTA_JSON, POSE_DELTA_PNG
+
     root = Path(run_dir)
     paths: list[Path] = []
     if full_steps:
@@ -160,6 +163,14 @@ def ensure_step_pngs_exist(
             if not p.is_file():
                 raise FileNotFoundError(f"missing step PNG: {p}")
             paths.append(p)
+    if include_pose_delta:
+        png = root / POSE_DELTA_PNG
+        js = root / POSE_DELTA_JSON
+        if not png.is_file():
+            raise FileNotFoundError(f"missing pair pose figure: {png}")
+        if not js.is_file():
+            raise FileNotFoundError(f"missing pair pose summary: {js}")
+        paths.extend([png, js])
     return paths
 
 

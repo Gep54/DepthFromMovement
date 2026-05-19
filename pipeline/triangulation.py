@@ -5,8 +5,8 @@ import numpy as np
 
 from pipeline.geometry import invert_se3
 
-# Minimum positive depth (metres) along +Z in each camera frame; points at or behind fail cheirality.
-CHEIRAL_MIN_Z = 1e-6  # 0.000001
+# Minimum camera-frame Z (metres) for cheirality; slightly negative is lenient (near the focal plane).
+CHEIRAL_MIN_Z = -0.01
 
 
 def cheiral_mask_cam_frames(
@@ -58,12 +58,13 @@ def triangulate_cam1_frame(
     t_c1_c2: np.ndarray,
     *,
     check_cheiral: bool = True,
+    min_z: float = CHEIRAL_MIN_Z,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Triangulate in camera-1 frame: P1=K[I|0], P2=K[R|t] with X_c2 expressed from X_c1
     as in OpenCV ``recoverPose`` / ``triangulatePoints`` convention.
 
-    Returns homogeneous (4,N) in camera-1 coordinates + cheirality mask (Z > CHEIRAL_MIN_Z in cam1 and cam2).
+    Returns homogeneous (4,N) in camera-1 coordinates + cheirality mask (Z > ``min_z`` in both cameras).
     """
     P1 = _projection_k_rt(K, np.eye(3, dtype=np.float64), np.zeros(3, dtype=np.float64))
     P2 = _projection_k_rt(K, R_c1_c2, t_c1_c2.ravel())
@@ -76,7 +77,7 @@ def triangulate_cam1_frame(
     if not check_cheiral or n == 0:
         mask = np.ones(n, dtype=bool) if n else np.zeros(0, dtype=bool)
     else:
-        mask = cheiral_mask_cam_frames(Xc, R_c1_c2, t_c1_c2)
+        mask = cheiral_mask_cam_frames(Xc, R_c1_c2, t_c1_c2, min_z=min_z)
     return X_h, mask
 
 
@@ -99,12 +100,13 @@ def triangulate_world_points(
     K: np.ndarray,
     *,
     check_cheiral: bool = True,
+    min_z: float = CHEIRAL_MIN_Z,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Triangulate homogeneous world points (4,N) from two views.
 
     Poses are **camera→world** (``motion.json`` convention).
-    Returns ``(Xw_h, cheiral_mask)`` where mask requires Z > CHEIRAL_MIN_Z in both cameras.
+    Returns ``(Xw_h, cheiral_mask)`` where mask requires Z > ``min_z`` in both cameras.
     """
     P1 = world_points_projection_matrix(K, world_T_c1)
     P2 = world_points_projection_matrix(K, world_T_c2)
@@ -121,5 +123,5 @@ def triangulate_world_points(
     else:
         z1 = (Tcw1[:3, :3] @ Xw + Tcw1[:3, 3].reshape(3, 1))[2, :]
         z2 = (Tcw2[:3, :3] @ Xw + Tcw2[:3, 3].reshape(3, 1))[2, :]
-        mask = (z1 > CHEIRAL_MIN_Z) & (z2 > CHEIRAL_MIN_Z)
+        mask = (z1 > min_z) & (z2 > min_z)
     return X_h, mask

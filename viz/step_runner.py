@@ -31,6 +31,7 @@ from viz.overlays import (
     sparse_depth_error_heatmap,
 )
 from viz.match_classification import MatchClassification
+from viz.pose_delta import POSE_DELTA_JSON, POSE_DELTA_PNG, export_pair_pose_delta
 from viz.recorder import (
     PipelineRecorder,
     geometry_slug_order,
@@ -234,7 +235,7 @@ def export_single_pair_stages(
     frame_features_cache: Sequence[FrameFeatures] | None = None,
     include_geometry: bool = True,
     rejection_audit_path: str | Path | None = None,
-    check_cheiral: bool = True,
+    map_cfg: MapConfig | None = None,
     full_steps: bool = False,
     detail_log: bool = False,
     export_epipolar: bool = False,
@@ -244,6 +245,7 @@ def export_single_pair_stages(
 
     Returns the rejection audit record for this pair.
     """
+    cfg = map_cfg if map_cfg is not None else MapConfig()
     feat_cfg = feat_cfg if feat_cfg is not None else ds.feature_config
     pair_root = Path(pair_run_dir)
 
@@ -272,8 +274,7 @@ def export_single_pair_stages(
         assert reuse_two_view.frame_i == i and reuse_two_view.frame_j == j
         tw = reuse_two_view
     else:
-        map_cfg = MapConfig(check_cheiral=check_cheiral)
-        m = IncrementalMap(cfg=map_cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
+        m = IncrementalMap(cfg=cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
         tw = m.add_frame_pair(i, j, g_i, g_j, features_i=fi, features_j=fj)
 
     pts1, pts2 = tw.pts1, tw.pts2
@@ -284,7 +285,7 @@ def export_single_pair_stages(
         rec_pair.write("raw_input", np.hstack([und_i, und_j]))
     rec_pair.write("matches", draw_matches(und_i, und_j, pts1, pts2))
 
-    cls = classify_match_rejections(tw, check_cheiral=check_cheiral)
+    cls = classify_match_rejections(tw, check_cheiral=cfg.check_cheiral)
     rec_pair.write(
         "match_classifications",
         draw_classified_matches(
@@ -320,6 +321,8 @@ def export_single_pair_stages(
             [epipolar_pair_view(i=i, j=j, und_i=und_i, und_j=und_j, tw=tw, K=K, world_T_camera=ds.world_T_camera)],
         )
 
+    export_pair_pose_delta(pair_root, Wi, Wj, frame_i=i, frame_j=j)
+
     return record
 
 
@@ -333,7 +336,7 @@ def export_all_stages(
     frame_features_cache: Sequence[FrameFeatures] | None = None,
     include_geometry: bool = True,
     rejection_audit_path: str | Path | None = None,
-    check_cheiral: bool = True,
+    map_cfg: MapConfig | None = None,
     full_steps: bool = False,
     detail_log: bool = False,
     export_epipolar: bool = False,
@@ -352,7 +355,7 @@ def export_all_stages(
         frame_features_cache=frame_features_cache,
         include_geometry=include_geometry,
         rejection_audit_path=audit_path,
-        check_cheiral=check_cheiral,
+        map_cfg=map_cfg,
         full_steps=full_steps,
         detail_log=detail_log,
         export_epipolar=export_epipolar,
@@ -369,7 +372,7 @@ def export_sequence_consecutive_pairs(
     pair_lookback: int = 10,
     include_geometry: bool = True,
     rejection_audit_path: str | Path | None = None,
-    check_cheiral: bool = True,
+    map_cfg: MapConfig | None = None,
     full_steps: bool = False,
     detail_log: bool = False,
     export_epipolar: bool = False,
@@ -382,7 +385,7 @@ def export_sequence_consecutive_pairs(
 
         run_dir/
           pairs/
-            iii_jjj/steps/{single,pair,geometry}/...
+            iii_jjj/pose_delta.png, pose_delta.json, steps/...
           rejection_audit.jsonl
           epipolar/   (optional, ``--epipolar``)
     """
@@ -408,9 +411,9 @@ def export_sequence_consecutive_pairs(
     _log_progress("dfm-export-steps: computing per-frame features …")
     frame_cache = compute_frame_features_cache(grays, fc)
 
-    map_cfg = MapConfig(check_cheiral=check_cheiral)
+    cfg = map_cfg if map_cfg is not None else MapConfig()
     inc = IncrementalMap(
-        cfg=map_cfg,
+        cfg=cfg,
         feat_cfg=fc,
         K=ds.calibration.K,
         world_T_camera=ds.world_T_camera,
@@ -459,7 +462,7 @@ def export_sequence_consecutive_pairs(
             frame_features_cache=frame_cache,
             include_geometry=include_geometry,
             rejection_audit_path=audit_path,
-            check_cheiral=check_cheiral,
+            map_cfg=cfg,
             full_steps=full_steps,
             detail_log=detail_log,
             export_epipolar=False,
@@ -501,6 +504,18 @@ def ensure_sequence_outputs_exist(
         raise FileNotFoundError(f"missing rejection audit: {audit}")
 
 
+def ensure_pair_pose_delta_exists(pair_run_dir: str | Path) -> tuple[Path, Path]:
+    """Verify ``pose_delta.png`` and ``pose_delta.json`` in a pair export folder."""
+    root = Path(pair_run_dir)
+    png = root / POSE_DELTA_PNG
+    js = root / POSE_DELTA_JSON
+    if not png.is_file():
+        raise FileNotFoundError(f"missing pair pose figure: {png}")
+    if not js.is_file():
+        raise FileNotFoundError(f"missing pair pose summary: {js}")
+    return png, js
+
+
 def ensure_step_pngs_exist(
     run_dir: str | Path,
     *,
@@ -508,12 +523,13 @@ def ensure_step_pngs_exist(
     full_steps: bool = False,
     detail_log: bool = False,
 ) -> list[Path]:
-    """Verify stage PNGs for the active export profile."""
+    """Verify stage PNGs and pair pose delta for the active export profile."""
     return _ensure_step_pngs_exist(
         run_dir,
         include_geometry=include_geometry,
         full_steps=full_steps,
         detail_log=detail_log,
+        include_pose_delta=True,
     )
 
 

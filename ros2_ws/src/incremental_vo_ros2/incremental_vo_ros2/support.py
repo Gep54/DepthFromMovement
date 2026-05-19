@@ -8,12 +8,18 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
 from geometry_msgs.msg import Quaternion
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, Image
+
+from incremental_vo_ros2.odom_history import OdomHistory, compose_se3, odom_stamp_nsec
+
+if TYPE_CHECKING:
+    from tf2_ros import Buffer
 
 from incremental_vo_ros2.image_buffer import (
     copy_image_msg,
@@ -29,7 +35,9 @@ from incremental_vo_ros2.range_gate import (
 
 __all__ = [
     "BufferedFrame",
+    "OdomHistory",
     "camera_info_to_calibration",
+    "compose_se3",
     "consecutive_keyframe_baseline_m",
     "copy_image_msg",
     "ensure_pipeline_on_path",
@@ -37,6 +45,7 @@ __all__ = [
     "image_msg_to_gray_undistorted",
     "max_sparse_range_m",
     "odom_position_xyz",
+    "odom_stamp_nsec",
     "odom_to_cam_to_world_T",
     "offline_dataset_image_basename",
     "pose_stamped_to_world_T_camera",
@@ -47,8 +56,10 @@ __all__ = [
     "save_sparse_map_npz",
     "should_buffer_image",
     "transform_points_world_T_camera",
+    "transform_stamped_to_matrix",
     "effective_K_from_calibration",
     "undistort_gray_if_needed",
+    "world_T_camera_from_odom",
     "world_T_camera_to_quaternion_xyzw",
 ]
 
@@ -85,8 +96,10 @@ def quat_msg_to_mat(q: Quaternion) -> np.ndarray:
 
 def odom_to_cam_to_world_T(msg: Odometry) -> np.ndarray:
     """
-    Build 4×4 ``cam_to_world`` (maps camera frame into ``msg.header.frame_id``), matching
-    ``pipeline``'s ``world_T_camera`` naming in datasets: X_world = T @ X_cam columns.
+    Build 4×4 ``world_T_{child}`` from odometry (child pose in ``header.frame_id``).
+
+    Matches ``pipeline`` ``world_T_camera`` naming when the odometry child frame is the
+    camera; otherwise compose with TF via :func:`world_T_camera_from_odom`.
     """
     p = msg.pose.pose.position
     q = msg.pose.pose.orientation
@@ -94,6 +107,83 @@ def odom_to_cam_to_world_T(msg: Odometry) -> np.ndarray:
     T[:3, :3] = quat_msg_to_mat(q)
     T[:3, 3] = (p.x, p.y, p.z)
     return T
+
+
+def transform_stamped_to_matrix(transform_stamped: Any) -> np.ndarray:
+    """``geometry_msgs/TransformStamped`` → 4×4 mapping source frame into target frame."""
+    tr = transform_stamped.transform.translation
+    q = transform_stamped.transform.rotation
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = quat_msg_to_mat(q)
+    T[:3, 3] = (float(tr.x), float(tr.y), float(tr.z))
+    return T
+
+
+def world_T_camera_from_odom(
+    odom: Odometry,
+    tf_buffer: Buffer | None,
+    *,
+    camera_frame: str,
+    base_frame: str,
+    stamp: Any,
+    use_latest_tf: bool,
+    apply_tf: bool,
+    tf_lookup_timeout_s: float = 0.15,
+) -> np.ndarray:
+    """
+    ``world_T_camera`` for a monocular camera from odometry and optional TF.
+
+    When ``apply_tf`` is true, prefers ``lookup_transform(world, camera)``; on failure
+    composes ``world_T_odom_child @ child_T_camera`` (trying ``child_frame_id`` then
+  ``base_frame`` as the body root).
+    """
+    T_world_body = odom_to_cam_to_world_T(odom)
+    if not apply_tf or tf_buffer is None or not camera_frame.strip():
+        return T_world_body
+
+    from rclpy.duration import Duration
+    from rclpy.time import Time
+    from tf2_ros import TransformException
+
+    if use_latest_tf:
+        tf_time = Time()
+    else:
+        tf_time = stamp if isinstance(stamp, Time) else Time()
+
+    world_frame = (odom.header.frame_id or "").strip()
+    child = (odom.child_frame_id or "").strip()
+    timeout = Duration(seconds=float(tf_lookup_timeout_s))
+
+    if world_frame:
+        try:
+            t_wc = tf_buffer.lookup_transform(
+                world_frame, camera_frame.strip(), tf_time, timeout=timeout
+            )
+            return transform_stamped_to_matrix(t_wc)
+        except TransformException:
+            pass
+
+    body_candidates = [f for f in (child, (base_frame or "").strip()) if f]
+    for body in body_candidates:
+        try:
+            t_bc = tf_buffer.lookup_transform(
+                body, camera_frame.strip(), tf_time, timeout=timeout
+            )
+            T_body_cam = transform_stamped_to_matrix(t_bc)
+            if body == child or not child:
+                return compose_se3(T_world_body, T_body_cam)
+            try:
+                t_wb = tf_buffer.lookup_transform(
+                    child, body, tf_time, timeout=timeout
+                )
+                T_child_body = transform_stamped_to_matrix(t_wb)
+                return compose_se3(T_world_body, compose_se3(T_child_body, T_body_cam))
+            except TransformException:
+                return compose_se3(T_world_body, T_body_cam)
+        except TransformException:
+            continue
+
+    return T_world_body
 
 
 def odom_position_xyz(msg: Odometry) -> np.ndarray:

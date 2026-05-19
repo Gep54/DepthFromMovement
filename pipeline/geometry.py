@@ -64,7 +64,7 @@ def estimate_essential_ransac(
     pts2: np.ndarray,
     K: np.ndarray,
     prob: float = 0.999,
-    threshold: float = 1.0,
+    threshold: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Returns E (3,3) and inlier mask (N,1) uint8."""
     if len(pts1) < 8:

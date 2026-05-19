@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from data.dataset import load_dataset
+from pipeline.map import MapConfig
 from viz.step_runner import (
     ensure_all_step_pngs_exist,
     ensure_sequence_outputs_exist,
@@ -52,7 +53,21 @@ def main() -> None:
     p.add_argument(
         "--no-cheiral",
         action="store_true",
-        help="Do not reject triangulated points by camera-frame depth (Z > 1e-6); keep all epipolar inliers",
+        help="Disable cheirality rejection; keep all epipolar inliers (default Z threshold is -0.01 m)",
+    )
+    p.add_argument(
+        "--epipolar-thresh",
+        type=float,
+        default=3.0,
+        metavar="PX",
+        help="RANSAC epipolar distance threshold in pixels (default 3.0; larger = looser)",
+    )
+    p.add_argument(
+        "--cheiral-min-z",
+        type=float,
+        default=-0.01,
+        metavar="M",
+        help="Cheirality: min camera-frame Z in metres, both views (default -0.01; lower = looser)",
     )
     p.add_argument(
         "--rejection-audit",
@@ -63,7 +78,11 @@ def main() -> None:
     args = p.parse_args()
     ds = load_dataset(args.dataset_root)
     include_geometry = not args.no_geometry_stages
-    check_cheiral = not args.no_cheiral
+    map_cfg = MapConfig(
+        check_cheiral=not args.no_cheiral,
+        ransac_epipolar_thresh=float(args.epipolar_thresh),
+        cheiral_min_z=float(args.cheiral_min_z),
+    )
     audit_path = args.rejection_audit
     full_steps = args.full_steps
     detail_log = args.detail_log
@@ -75,7 +94,7 @@ def main() -> None:
             pair_lookback=args.pair_lookback,
             include_geometry=include_geometry,
             rejection_audit_path=audit_path,
-            check_cheiral=check_cheiral,
+            map_cfg=map_cfg,
             full_steps=full_steps,
             detail_log=detail_log,
             export_epipolar=export_epipolar,
@@ -96,7 +115,7 @@ def main() -> None:
             j=args.j,
             include_geometry=include_geometry,
             rejection_audit_path=audit_path,
-            check_cheiral=check_cheiral,
+            map_cfg=map_cfg,
             full_steps=full_steps,
             detail_log=detail_log,
             export_epipolar=export_epipolar,
