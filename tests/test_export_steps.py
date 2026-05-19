@@ -39,8 +39,6 @@ def test_export_minimal_step_pngs(mini_dataset_dir: Path, tmp_path: Path) -> Non
 
     audit = run_dir / "rejection_audit.jsonl"
     assert audit.is_file()
-    pairs_json = run_dir / "summary" / "pairs_all_rejection_types.json"
-    assert pairs_json.is_file()
 
     export_all_stages(ds, tmp_path / "run_no_geom", i=0, j=1, include_geometry=False)
     ensure_step_pngs_exist(tmp_path / "run_no_geom", include_geometry=False)
@@ -150,10 +148,7 @@ def test_export_sequence_consecutive_pairs(mini_dataset_dir: Path, tmp_path: Pat
 
     ensure_sequence_outputs_exist(run_root, n, pair_lookback=10)
     assert len(list((run_root / "pairs").iterdir())) == len(iter_sequence_pairs(n, 10))
-
-    pairs_json = run_root / "summary" / "pairs_all_rejection_types.json"
-    data = json.loads(pairs_json.read_text(encoding="utf-8"))
-    assert "pairs" in data
+    assert (run_root / "rejection_audit.jsonl").is_file()
 
     run_b = tmp_path / "seq_run_lb1"
     export_sequence_consecutive_pairs(ds, run_b, pair_lookback=1)

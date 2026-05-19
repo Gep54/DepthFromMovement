@@ -19,13 +19,7 @@ def main() -> None:
     p.add_argument(
         "--sequence",
         action="store_true",
-        help="Export multi-baseline pairs under run_dir/pairs/, fused landmarks in summary/",
-    )
-    p.add_argument(
-        "--fuse-merge-px",
-        type=float,
-        default=4.0,
-        help="Pixel radius for landmark fusion when --sequence (default 4)",
+        help="Export multi-baseline pairs under run_dir/pairs/",
     )
     p.add_argument(
         "--pair-lookback",
@@ -78,7 +72,6 @@ def main() -> None:
         export_sequence_consecutive_pairs(
             ds,
             args.run_dir,
-            fuse_merge_px=args.fuse_merge_px,
             pair_lookback=args.pair_lookback,
             include_geometry=include_geometry,
             rejection_audit_path=audit_path,

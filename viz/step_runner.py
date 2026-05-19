@@ -11,12 +11,10 @@ from pipeline.config import FeatureConfig
 from pipeline.features import FrameFeatures, compute_frame_features_cache, detect_and_compute
 from pipeline.geometry import essential_from_world_poses, invert_se3
 from pipeline.map import IncrementalMap, MapConfig, TwoViewResult
-from pipeline.fusion import FusedLandmarkMap, fused_world_points_homogeneous
 from viz.match_classification import (
     append_rejection_audit,
     audit_record,
     classify_match_rejections,
-    write_pairs_all_rejection_types,
 )
 from viz.epipolar_report import EpipolarPairView, export_epipolar_pdf_bundle
 from viz.overlays import (
@@ -30,7 +28,6 @@ from viz.overlays import (
     grayscale_to_bgr,
     project_points_topdown,
     project_world_points_to_camera_uv_z,
-    render_trajectory_topdown,
     sparse_depth_error_heatmap,
 )
 from viz.match_classification import MatchClassification
@@ -360,10 +357,6 @@ def export_all_stages(
         detail_log=detail_log,
         export_epipolar=export_epipolar,
     )
-    _log_progress("dfm-export-steps: writing summary (pairs_all_rejection_types.json)")
-    summary_dir = Path(run_dir) / "summary"
-    summary_dir.mkdir(parents=True, exist_ok=True)
-    write_pairs_all_rejection_types(summary_dir / "pairs_all_rejection_types.json", [record])
     _log_progress("dfm-export-steps: done")
     return record
 
@@ -373,7 +366,6 @@ def export_sequence_consecutive_pairs(
     run_dir: str | Path,
     *,
     feat_cfg: FeatureConfig | None = None,
-    fuse_merge_px: float = 4.0,
     pair_lookback: int = 10,
     include_geometry: bool = True,
     rejection_audit_path: str | Path | None = None,
@@ -391,18 +383,12 @@ def export_sequence_consecutive_pairs(
         run_dir/
           pairs/
             iii_jjj/steps/{single,pair,geometry}/...
-          summary/
-            trajectory_topdown_full_sequence.png
-            fused_landmarks_topdown.png
-            fused_estimated_depth_ref000.png
-            pairs_all_rejection_types.json
           rejection_audit.jsonl
+          epipolar/   (optional, ``--epipolar``)
     """
     root = Path(run_dir)
     pairs_root = root / "pairs"
     pairs_root.mkdir(parents=True, exist_ok=True)
-    summary_root = root / "summary"
-    summary_root.mkdir(parents=True, exist_ok=True)
     n = len(ds.image_paths)
     if n < 2:
         raise ValueError(f"need at least 2 images for sequence export, got {n}")
@@ -430,14 +416,11 @@ def export_sequence_consecutive_pairs(
         world_T_camera=ds.world_T_camera,
         window=10**9,
     )
-    fused = FusedLandmarkMap(merge_px=fuse_merge_px)
-
     pairs = iter_sequence_pairs(n, wl)
     n_pairs = len(pairs)
     _log_progress(
         f"dfm-export-steps: {n} frames, {n_pairs} pairs (lookback={wl}) -> {root.resolve()}"
     )
-    audit_records: list[dict] = []
     epipolar_views: list[EpipolarPairView] = []
     for pair_idx, (i, j) in enumerate(pairs, start=1):
         _log_progress(f"dfm-export-steps: pair {i}-{j} ({pair_idx}/{n_pairs}) …")
@@ -449,7 +432,6 @@ def export_sequence_consecutive_pairs(
             features_i=frame_cache[i],
             features_j=frame_cache[j],
         )
-        fused.integrate_two_view_result(tw)
         pair_dir = pairs_root / f"{i:03d}_{j:03d}"
         bgr_i = read_image_bgr(ds.image_paths[i])
         bgr_j = read_image_bgr(ds.image_paths[j])
@@ -467,7 +449,7 @@ def export_sequence_consecutive_pairs(
                     world_T_camera=ds.world_T_camera,
                 )
             )
-        record = export_single_pair_stages(
+        export_single_pair_stages(
             ds,
             pair_dir,
             i=i,
@@ -483,69 +465,13 @@ def export_sequence_consecutive_pairs(
             export_epipolar=False,
         )
         n_tri = int(tw.X_world_h.shape[1]) if tw.X_world_h.size else 0
-        _log_progress(
-            f"dfm-export-steps: pair {i}-{j} done ({n_tri} triangulated cols, fused n={len(fused.landmarks)})"
-        )
-        audit_records.append(record)
+        _log_progress(f"dfm-export-steps: pair {i}-{j} done ({n_tri} triangulated cols)")
 
-    _log_progress(f"dfm-export-steps: finished {n_pairs} pairs, writing summary …")
+    _log_progress(f"dfm-export-steps: finished {n_pairs} pairs")
 
     if export_epipolar and epipolar_views:
         _log_progress(f"dfm-export-steps: writing epipolar PDFs ({len(epipolar_views)} pages) …")
         export_epipolar_pdf_bundle(root, epipolar_views)
-
-    _log_progress("dfm-export-steps: writing summary/pairs_all_rejection_types.json …")
-    write_pairs_all_rejection_types(summary_root / "pairs_all_rejection_types.json", audit_records)
-
-    _log_progress("dfm-export-steps: writing summary/trajectory_topdown_full_sequence.png …")
-    traj_full = render_trajectory_topdown(
-        ds.world_T_camera,
-        ds.gt_world_T_camera,
-        highlight_frame_indices=None,
-    )
-    out_png = summary_root / "trajectory_topdown_full_sequence.png"
-    ok = cv2.imwrite(str(out_png), traj_full)
-    if not ok:
-        raise RuntimeError(f"failed to write {out_png}")
-
-    K = ds.calibration.K
-    W0 = ds.world_T_camera[0]
-    nf = len(fused.landmarks)
-    _log_progress(f"dfm-export-steps: writing summary/fused_estimated_depth_ref000.png ({nf} landmarks) …")
-    X_h, cheiral_pass = fused_world_points_homogeneous(fused)
-    uv_f, z_f = project_world_points_to_camera_uv_z(X_h, cheiral_pass, K, W0)
-    bgr0 = read_image_bgr(ds.image_paths[0])
-    und0, _ = _undistort_if_needed(bgr0, ds)
-    fused_depth = estimated_depth_visualization(und0, uv_f, z_f)
-    cv2.putText(
-        fused_depth,
-        f"fused landmarks: {nf}",
-        (12, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
-        (240, 240, 240),
-        2,
-        cv2.LINE_AA,
-    )
-    fused_depth_path = summary_root / "fused_estimated_depth_ref000.png"
-    if not cv2.imwrite(str(fused_depth_path), fused_depth):
-        raise RuntimeError(f"failed to write {fused_depth_path}")
-
-    topdown = project_points_topdown(fused.positions_xyz())
-    cv2.putText(
-        topdown,
-        f"fused n={nf}",
-        (10, 28),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 0, 0),
-        2,
-        cv2.LINE_AA,
-    )
-    _log_progress("dfm-export-steps: writing summary/fused_landmarks_topdown.png …")
-    fused_xy_path = summary_root / "fused_landmarks_topdown.png"
-    if not cv2.imwrite(str(fused_xy_path), topdown):
-        raise RuntimeError(f"failed to write {fused_xy_path}")
 
     _log_progress("dfm-export-steps: done")
     return pairs
@@ -560,7 +486,7 @@ def ensure_sequence_outputs_exist(
     full_steps: bool = False,
     detail_log: bool = False,
 ) -> None:
-    """Check pair step PNGs, trajectory summary, fused-landmark summaries, and audit file."""
+    """Check per-pair step PNGs and ``rejection_audit.jsonl``."""
     root = Path(run_dir)
     wl = max(1, int(pair_lookback))
     for i, j in iter_sequence_pairs(n_frames, wl):
@@ -570,19 +496,9 @@ def ensure_sequence_outputs_exist(
             full_steps=full_steps,
             detail_log=detail_log,
         )
-    sf = root / "summary" / "trajectory_topdown_full_sequence.png"
-    if not sf.is_file():
-        raise FileNotFoundError(f"missing sequence summary: {sf}")
-    for name in ("fused_landmarks_topdown.png", "fused_estimated_depth_ref000.png"):
-        p = root / "summary" / name
-        if not p.is_file():
-            raise FileNotFoundError(f"missing fused summary: {p}")
     audit = root / "rejection_audit.jsonl"
     if not audit.is_file():
         raise FileNotFoundError(f"missing rejection audit: {audit}")
-    pairs_json = root / "summary" / "pairs_all_rejection_types.json"
-    if not pairs_json.is_file():
-        raise FileNotFoundError(f"missing pairs summary: {pairs_json}")
 
 
 def ensure_step_pngs_exist(
