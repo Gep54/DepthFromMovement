@@ -10,6 +10,7 @@ from data.feature_matching_json import load_feature_matching_json
 from data.fusion_json import default_fusion_config, load_fusion_json
 from data.gt_io import load_gt_depth, load_tum_poses, tum_rows_to_world_T_camera
 from data.io_json import load_calibration_json, load_motion_json, world_T_camera_from_motion
+from data.motion_frames import apply_motion_frame_conversion
 from pipeline.config import FeatureConfig
 from pipeline.metric_fusion import fuse_pose_sequence
 from data.schema import (
@@ -120,6 +121,7 @@ def load_dataset(
         validate_dataset_consistency(calibration, motion, image_paths)
 
     world_T_camera = world_T_camera_from_motion(motion)
+    world_T_camera = apply_motion_frame_conversion(world_T_camera, motion, root_p)
 
     fusion_cfg = default_fusion_config()
     if p.fusion_file is not None and p.fusion_file.is_file():

@@ -35,6 +35,16 @@ class MotionSpec:
     """absolute: T[i] is pose of frame i. relative_to_prev: T[i] maps frame i-1 -> i (T[0] often identity)."""
     transforms: list[np.ndarray]
     """Each (4, 4) homogeneous SE(3), ``world_T_camera``: maps camera→world, ``X_w = R X_c + t``."""
+    world_frame: str | None = None
+    """TF world in which ``transforms`` are expressed (e.g. ``uav1/fixed_origin``)."""
+    target_world_frame: str | None = None
+    """Pipeline / odometry world (default ``uav1/gps_baro_origin``)."""
+    pose_frame: str | None = None
+    """Body/sensor frame in each ``T`` (e.g. ``uav1/fcu``); default ``uav1/fcu`` when reframing."""
+    camera_frame: str | None = None
+    """Target camera frame after reframe (default ``uav1/rgb``)."""
+    tf_static_file: str | None = None
+    """Optional path to ``tf_static`` echo YAML (else dataset or repo default)."""
 
     def __post_init__(self) -> None:
         cleaned: list[np.ndarray] = []

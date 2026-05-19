@@ -61,10 +61,22 @@ def load_motion_json(path: Path) -> MotionSpec:
             transforms.append(np.asarray(fr["T"], dtype=np.float64))
         else:
             transforms.append(np.asarray(fr, dtype=np.float64))
+    def _opt_str(key: str) -> str | None:
+        v = raw.get(key)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
     return MotionSpec(
         pose_convention=pose_convention,  # type: ignore[arg-type]
         representation=representation,  # type: ignore[arg-type]
         transforms=transforms,
+        world_frame=_opt_str("world_frame"),
+        target_world_frame=_opt_str("target_world_frame"),
+        pose_frame=_opt_str("pose_frame"),
+        camera_frame=_opt_str("camera_frame"),
+        tf_static_file=_opt_str("tf_static_file"),
     )
 
 
@@ -75,6 +87,10 @@ def save_motion_json(
     pose_convention: PoseConvention = "world_T_camera",
     representation: MotionRepresentation = "absolute",
     filenames: Sequence[str] | None = None,
+    world_frame: str | None = None,
+    target_world_frame: str | None = None,
+    pose_frame: str | None = None,
+    camera_frame: str | None = None,
 ) -> None:
     """Write ``motion.json`` in the same schema as :func:`load_motion_json`."""
     if filenames is not None and len(filenames) != len(transforms):
@@ -92,11 +108,19 @@ def save_motion_json(
         if filenames is not None:
             fr["filename"] = filenames[i]
         frames.append(fr)
-    payload = {
+    payload: dict[str, Any] = {
         "pose_convention": pose_convention,
         "representation": representation,
         "frames": frames,
     }
+    if world_frame:
+        payload["world_frame"] = world_frame
+    if target_world_frame:
+        payload["target_world_frame"] = target_world_frame
+    if pose_frame:
+        payload["pose_frame"] = pose_frame
+    if camera_frame:
+        payload["camera_frame"] = camera_frame
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 

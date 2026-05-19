@@ -924,10 +924,17 @@ class IncrementalVoNode(Node):
                 np.asarray(fr["T"], dtype=np.float64) for fr in self._offline_motion_frames
             ]
             filenames = [str(fr["filename"]) for fr in self._offline_motion_frames]
+            world_frame = ""
+            if self._last_odom is not None:
+                world_frame = (self._last_odom.header.frame_id or "").strip()
             save_motion_json(
                 self._offline_dataset_dir / "motion.json",
                 transforms,
                 filenames=filenames,
+                world_frame=world_frame or None,
+                target_world_frame=world_frame or None,
+                pose_frame=self._camera_frame.strip() or None,
+                camera_frame=self._camera_frame.strip() or None,
             )
         except Exception as e:
             self.get_logger().warn(f"save_motion_json failed: {e}")
