@@ -75,6 +75,26 @@ When sourcing the overlay, you may see **RTI Connext DDS** warnings about `rtise
 ros2 run incremental_vo_ros2 incremental_vo_node
 ```
 
+### ROS 2 package `map_3d_ros2` (simplified sparse mapper)
+
+A lighter node **`map_3d`** subscribes to image, **`CameraInfo`**, odometry, **`/tf`**, and **`/tf_static`**. It selects keyframes when odometry translation since the last keyframe exceeds **`motion_threshold_m`** (default **0.5** m), triangulates each new keyframe against the previous one via **`pipeline.IncrementalMap`**, and **appends** cheiral 3D points (no descriptor fusion). It publishes **`3d_map`** (`sensor_msgs/PointCloud2`, odom world frame) and **`camera_pose`** (`geometry_msgs/PoseStamped` = **`invert(world_T_camera)`**, i.e. world→camera, inverse of the transform applied to lift points).
+
+**Build:**
+
+```bash
+colcon build --packages-select map_3d_ros2
+```
+
+**Run** (example race rosbag; play bag with `--clock` in another terminal):
+
+```bash
+ros2 run map_3d_ros2 map_3d \
+  --config-file ../configuration.map_3d.env \
+  --ros-args -p use_sim_time:=true
+```
+
+Config discovery: `--config-file`, env **`MAP_3D_CONFIG`**, or **`./configuration.env`**. See [`configuration.map_3d.env`](configuration.map_3d.env).
+
 ### Parameter precedence
 
 Node parameters resolve in this order (highest wins last):

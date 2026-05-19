@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: map_3d_ros2
+Version: 0.1.0
+Summary: Sparse 3D map ROS 2 node (map_3d)
+Maintainer: maintainer
+Maintainer-email: user@example.com
+License: Apache-2.0
+Requires-Dist: setuptools
+Requires-Dist: numpy
+Requires-Dist: opencv-python
+Requires-Dist: scipy
+Dynamic: license
+Dynamic: maintainer
+Dynamic: maintainer-email
+Dynamic: requires-dist
+Dynamic: summary
