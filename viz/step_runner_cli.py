@@ -41,6 +41,11 @@ def main() -> None:
         help="Skip triangulation / estimated depth / depth error under steps/geometry/",
     )
     p.add_argument(
+        "--no-cheiral",
+        action="store_true",
+        help="Do not reject triangulated points by camera-frame depth (Z > 1e-6); keep all epipolar inliers",
+    )
+    p.add_argument(
         "--reproj-outlier-px",
         type=float,
         default=3.0,
@@ -55,6 +60,7 @@ def main() -> None:
     args = p.parse_args()
     ds = load_dataset(args.dataset_root)
     include_geometry = not args.no_geometry_stages
+    check_cheiral = not args.no_cheiral
     audit_path = args.rejection_audit
     if args.sequence:
         export_sequence_consecutive_pairs(
@@ -65,6 +71,7 @@ def main() -> None:
             include_geometry=include_geometry,
             reproj_thresh_px=args.reproj_outlier_px,
             rejection_audit_path=audit_path,
+            check_cheiral=check_cheiral,
         )
         ensure_sequence_outputs_exist(
             args.run_dir,
@@ -81,6 +88,7 @@ def main() -> None:
             include_geometry=include_geometry,
             reproj_thresh_px=args.reproj_outlier_px,
             rejection_audit_path=audit_path,
+            check_cheiral=check_cheiral,
         )
         ensure_all_step_pngs_exist(args.run_dir, include_geometry=include_geometry)
 

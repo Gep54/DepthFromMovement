@@ -56,6 +56,8 @@ def triangulate_cam1_frame(
     K: np.ndarray,
     R_c1_c2: np.ndarray,
     t_c1_c2: np.ndarray,
+    *,
+    check_cheiral: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Triangulate in camera-1 frame: P1=K[I|0], P2=K[R|t] with X_c2 expressed from X_c1
@@ -70,7 +72,11 @@ def triangulate_cam1_frame(
     X_h = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)
     X_h = X_h / (X_h[3:4, :] + 1e-12)
     Xc = X_h[:3, :]
-    mask = cheiral_mask_cam_frames(Xc, R_c1_c2, t_c1_c2)
+    n = Xc.shape[1]
+    if not check_cheiral or n == 0:
+        mask = np.ones(n, dtype=bool) if n else np.zeros(0, dtype=bool)
+    else:
+        mask = cheiral_mask_cam_frames(Xc, R_c1_c2, t_c1_c2)
     return X_h, mask
 
 
@@ -91,6 +97,8 @@ def triangulate_world_points(
     world_T_c1: np.ndarray,
     world_T_c2: np.ndarray,
     K: np.ndarray,
+    *,
+    check_cheiral: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Triangulate homogeneous world points (4,N) from two views.
@@ -107,7 +115,11 @@ def triangulate_world_points(
     Xw = X_h[:3, :]
     Tcw1 = invert_se3(world_T_c1)
     Tcw2 = invert_se3(world_T_c2)
-    z1 = (Tcw1[:3, :3] @ Xw + Tcw1[:3, 3].reshape(3, 1))[2, :]
-    z2 = (Tcw2[:3, :3] @ Xw + Tcw2[:3, 3].reshape(3, 1))[2, :]
-    mask = (z1 > CHEIRAL_MIN_Z) & (z2 > CHEIRAL_MIN_Z)
+    n = Xw.shape[1]
+    if not check_cheiral or n == 0:
+        mask = np.ones(n, dtype=bool) if n else np.zeros(0, dtype=bool)
+    else:
+        z1 = (Tcw1[:3, :3] @ Xw + Tcw1[:3, 3].reshape(3, 1))[2, :]
+        z2 = (Tcw2[:3, :3] @ Xw + Tcw2[:3, 3].reshape(3, 1))[2, :]
+        mask = (z1 > CHEIRAL_MIN_Z) & (z2 > CHEIRAL_MIN_Z)
     return X_h, mask

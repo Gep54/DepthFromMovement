@@ -39,6 +39,34 @@ def test_export_all_step_pngs(mini_dataset_dir: Path, tmp_path: Path) -> None:
     ensure_step_pngs_exist(tmp_path / "run_no_geom", include_geometry=False)
 
 
+def test_no_cheiral_keeps_more_inliers_than_default(mini_dataset_dir: Path) -> None:
+    ds = load_dataset(mini_dataset_dir)
+    from pipeline.map import IncrementalMap, MapConfig
+    import cv2
+
+    g_i = cv2.imread(str(ds.image_paths[0]), cv2.IMREAD_GRAYSCALE)
+    g_j = cv2.imread(str(ds.image_paths[1]), cv2.IMREAD_GRAYSCALE)
+    K = ds.calibration.K
+    wt = ds.world_T_camera
+
+    m_on = IncrementalMap(cfg=MapConfig(check_cheiral=True), feat_cfg=ds.feature_config, K=K, world_T_camera=wt)
+    tw_on = m_on.add_frame_pair(0, 1, g_i, g_j)
+    m_off = IncrementalMap(cfg=MapConfig(check_cheiral=False), feat_cfg=ds.feature_config, K=K, world_T_camera=wt)
+    tw_off = m_off.add_frame_pair(0, 1, g_i, g_j)
+
+    cls_on = classify_match_rejections(
+        tw_on, K, wt[0], wt[1], check_cheiral=True
+    )
+    cls_off = classify_match_rejections(
+        tw_off, K, wt[0], wt[1], check_cheiral=False
+    )
+    assert int(cls_off.cheiral.sum()) == 0
+    assert int(cls_off.inlier.sum()) >= int(cls_on.inlier.sum())
+    if tw_on.X_world_h.shape[1] > 0:
+        assert tw_off.cheiral_mask.all()
+        assert np.sum(~np.isfinite(tw_on.X_world_h[:3, :])) >= 0
+
+
 def test_classify_match_rejections_exclusive(mini_dataset_dir: Path) -> None:
     ds = load_dataset(mini_dataset_dir)
     from pipeline.map import IncrementalMap, MapConfig

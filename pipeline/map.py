@@ -25,6 +25,8 @@ class MapConfig:
 
     ransac_epipolar_thresh: float = 1.0
     min_parallax_deg: float = 0.5
+    check_cheiral: bool = True
+    """If False, keep all triangulated epipolar inliers (no Z-depth rejection)."""
 
 
 @dataclass
@@ -157,9 +159,15 @@ class IncrementalMap:
             return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
 
         E = essential_from_R_t(R_est, t_est)
-        X_cam_h, cheiral = triangulate_cam1_frame(pts1_i, pts2_i, self.K, R_est, t_est)
+        X_cam_h, cheiral = triangulate_cam1_frame(
+            pts1_i, pts2_i, self.K, R_est, t_est, check_cheiral=self.cfg.check_cheiral
+        )
         X_h = cam1_to_world_points(X_cam_h, Wi)
-        X_h[:, ~cheiral] = np.nan
+        if self.cfg.check_cheiral:
+            X_h[:, ~cheiral] = np.nan
+        else:
+            n_cols = X_h.shape[1]
+            cheiral = np.ones(n_cols, dtype=bool) if n_cols else cheiral
         err1 = reprojection_errors(X_h, pts1_i, self.K, Wi)
         err2 = reprojection_errors(X_h, pts2_i, self.K, Wj)
         reproj = summarize_reprojection(err1, err2)

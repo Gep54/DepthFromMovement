@@ -174,6 +174,7 @@ def export_single_pair_stages(
     include_geometry: bool = True,
     reproj_thresh_px: float = 3.0,
     rejection_audit_path: str | Path | None = None,
+    check_cheiral: bool = True,
 ) -> dict:
     """
     Run the two-view pipeline for frames ``(i, j)`` and write illustration PNGs.
@@ -207,7 +208,7 @@ def export_single_pair_stages(
         assert reuse_two_view.frame_i == i and reuse_two_view.frame_j == j
         tw = reuse_two_view
     else:
-        map_cfg = MapConfig()
+        map_cfg = MapConfig(check_cheiral=check_cheiral)
         m = IncrementalMap(cfg=map_cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
         tw = m.add_frame_pair(i, j, g_i, g_j, features_i=fi, features_j=fj)
 
@@ -227,7 +228,9 @@ def export_single_pair_stages(
         draw_epipolar_outliers_with_lines(und_i, und_j, pts1, pts2, F, tw.inlier_mask),
     )
 
-    cls = classify_match_rejections(tw, K, Wi, Wj, reproj_thresh_px=reproj_thresh_px)
+    cls = classify_match_rejections(
+        tw, K, Wi, Wj, reproj_thresh_px=reproj_thresh_px, check_cheiral=check_cheiral
+    )
     rec_pair.write(
         "match_classifications",
         draw_classified_matches(
@@ -267,6 +270,7 @@ def export_all_stages(
     include_geometry: bool = True,
     reproj_thresh_px: float = 3.0,
     rejection_audit_path: str | Path | None = None,
+    check_cheiral: bool = True,
 ) -> dict:
     """Single pair ``(i, j)`` into ``run_dir/steps/{single,pair,geometry}/``."""
     audit_path = rejection_audit_path if rejection_audit_path is not None else Path(run_dir) / "rejection_audit.jsonl"
@@ -282,6 +286,7 @@ def export_all_stages(
         include_geometry=include_geometry,
         reproj_thresh_px=reproj_thresh_px,
         rejection_audit_path=audit_path,
+        check_cheiral=check_cheiral,
     )
     if record.get("has_all_rejection_types"):
         write_pairs_all_rejection_types(
@@ -301,6 +306,7 @@ def export_sequence_consecutive_pairs(
     include_geometry: bool = True,
     reproj_thresh_px: float = 3.0,
     rejection_audit_path: str | Path | None = None,
+    check_cheiral: bool = True,
 ) -> list[tuple[int, int]]:
     """
     For each frame index ``j`` from ``1`` to ``n-1``, pair it with frames
@@ -341,7 +347,7 @@ def export_sequence_consecutive_pairs(
 
     frame_cache = compute_frame_features_cache(grays, fc)
 
-    map_cfg = MapConfig()
+    map_cfg = MapConfig(check_cheiral=check_cheiral)
     inc = IncrementalMap(
         cfg=map_cfg,
         feat_cfg=fc,
@@ -375,6 +381,7 @@ def export_sequence_consecutive_pairs(
             include_geometry=include_geometry,
             reproj_thresh_px=reproj_thresh_px,
             rejection_audit_path=audit_path,
+            check_cheiral=check_cheiral,
         )
         audit_records.append(record)
 
