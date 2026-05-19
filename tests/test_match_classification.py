@@ -24,4 +24,4 @@ def test_classify_empty_pair() -> None:
     cls = classify_match_rejections(tw)
     assert classification_counts(cls) == {"epipolar": 0, "cheiral": 0, "inlier": 0}
     rec = audit_record(0, 1, cls)
-    assert rec["has_all_rejection_types"] is False
+    assert rec == {"i": 0, "j": 1, "counts": {"epipolar": 0, "cheiral": 0, "inlier": 0}}

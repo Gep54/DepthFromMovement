@@ -7,7 +7,8 @@ import numpy as np
 from scipy.interpolate import griddata
 
 from pipeline.geometry import invert_se3
-from pipeline.triangulation import CHEIRAL_MIN_Z
+# Smallest |Z| used only to avoid division by zero when projecting (not a cheirality gate).
+_PROJ_MIN_ABS_Z = 1e-12
 
 # Sparse halos on the dark panel stay compact; photo overlay uses a larger disk for visibility.
 DEFAULT_DEPTH_HALO_RADIUS_SPARSE_PX = 5
@@ -151,7 +152,7 @@ def blend_sparse_depth_halos_on_photo(
     pa = float(np.clip(peak_alpha, 0.0, 1.0))
     for k in range(len(z_cam_m)):
         z = float(z_cam_m[k])
-        if not np.isfinite(z) or z <= 0:
+        if not np.isfinite(z):
             continue
         uc = int(round(float(uv[k, 0])))
         vc = int(round(float(uv[k, 1])))
@@ -218,10 +219,16 @@ def project_world_points_to_camera_uv_z(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Project triangulated homogeneous world points into the camera frame.
-    Returns pixel coords ``uv`` (N, 2) as float (u, v) and positive depths ``z_cam`` (N,) in metres.
+
+    Uses triangulation output as-is: only finite 3D coordinates are required.
+    ``cheiral_mask`` is accepted for API compatibility but not used to reject points
+    (failed cheiral columns are expected to be non-finite in ``X_world_h``).
+    No positive-depth or cheirality re-check is applied here.
+    Returns pixel coords ``uv`` (N, 2) and camera-frame depths ``z_cam`` (N,) in metres.
     """
+    del cheiral_mask  # mask is redundant with NaN storage when cheirality is enabled upstream
     X = X_world_h[:3, :]
-    valid = cheiral_mask & np.all(np.isfinite(X), axis=0)
+    valid = np.all(np.isfinite(X), axis=0)
     if not np.any(valid):
         return np.zeros((0, 2), np.float64), np.zeros(0, np.float64)
     X = X[:, valid]
@@ -230,9 +237,9 @@ def project_world_points_to_camera_uv_z(
     t = Tcw[:3, 3].reshape(3, 1)
     Xc = R @ X + t
     z = Xc[2, :]
-    front = z > CHEIRAL_MIN_Z
-    Xc = Xc[:, front]
-    z = z[front]
+    proj_ok = np.isfinite(z) & (np.abs(z) > _PROJ_MIN_ABS_Z)
+    Xc = Xc[:, proj_ok]
+    z = z[proj_ok]
     if z.size == 0:
         return np.zeros((0, 2), np.float64), np.zeros(0, np.float64)
     fx, fy = K[0, 0], K[1, 1]
@@ -247,7 +254,7 @@ def depth_colormap_range_m(
     z_cam_m: np.ndarray,
     percentile: tuple[float, float] = (2.0, 98.0),
 ) -> tuple[float, float]:
-    z = z_cam_m[np.isfinite(z_cam_m) & (z_cam_m > 0)]
+    z = z_cam_m[np.isfinite(z_cam_m)]
     if z.size == 0:
         return 0.0, 1.0
     lo, hi = np.percentile(z, percentile)
@@ -266,7 +273,7 @@ def splat_min_depth_per_pixel(
     zz = np.full((height, width), np.nan, dtype=np.float64)
     for k in range(len(z_cam_m)):
         zz_k = float(z_cam_m[k])
-        if not np.isfinite(zz_k) or zz_k <= 0:
+        if not np.isfinite(zz_k):
             continue
         u, v = int(round(float(uv[k, 0]))), int(round(float(uv[k, 1])))
         if not (0 <= u < width and 0 <= v < height):
@@ -309,7 +316,7 @@ def render_sparse_depth_pixels(
     hr = max(0, int(halo_radius))
     for k in range(len(z_cam_m)):
         z = float(z_cam_m[k])
-        if not np.isfinite(z) or z <= 0:
+        if not np.isfinite(z):
             continue
         u, v = int(round(float(uv[k, 0]))), int(round(float(uv[k, 1])))
         draw_depth_point_halo(canvas, u, v, z, lo, hi, outer_radius=hr)
@@ -354,7 +361,7 @@ def render_dense_depth_colormap(
         lo, hi = float(z_lo_m), float(z_hi_m)
     else:
         lo, hi = depth_colormap_range_m(values, percentile)
-    valid = np.isfinite(zi) & (zi > 0)
+    valid = np.isfinite(zi)
     color = np.full((height, width, 3), 12, dtype=np.uint8)
     if np.any(valid):
         rgb_layer = depth_to_bgr_colormap(zi, lo, hi)
@@ -433,7 +440,7 @@ def estimated_depth_visualization(
     dense_bgr, zi = render_dense_depth_colormap(
         h, w, uv, z_cam_m, z_lo_m=lo, z_hi_m=hi, interp=dense_interp
     )
-    valid = np.isfinite(zi) & (zi > 0)
+    valid = np.isfinite(zi)
     fused = blend_photo_depth_colormap(bgr, dense_bgr, valid, alpha=blend_alpha)
     draw_depth_scale_bar_bottom_right(fused, lo, hi)
     return np.hstack([sparse, dense_bgr, fused])

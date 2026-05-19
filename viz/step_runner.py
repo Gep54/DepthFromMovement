@@ -11,7 +11,6 @@ from pipeline.config import FeatureConfig
 from pipeline.features import FrameFeatures, compute_frame_features_cache, detect_and_compute
 from pipeline.geometry import essential_from_world_poses, invert_se3
 from pipeline.map import IncrementalMap, MapConfig, TwoViewResult
-from pipeline.triangulation import CHEIRAL_MIN_Z
 from pipeline.fusion import FusedLandmarkMap, fused_world_points_homogeneous
 from viz.match_classification import (
     append_rejection_audit,
@@ -56,6 +55,11 @@ def _undistort_if_needed(bgr: np.ndarray, ds: Dataset) -> tuple[np.ndarray, np.n
     und = cv2.undistort(bgr, ds.calibration.K, ds.calibration.dist_coeffs, None, newK=new_K)
     g = cv2.cvtColor(und, cv2.COLOR_BGR2GRAY)
     return und, g
+
+
+def _log_progress(message: str) -> None:
+    """Stdout progress line (flushed) for long offline exports."""
+    print(message, flush=True)
 
 
 def fundamental_from_essential(E: np.ndarray, K: np.ndarray) -> np.ndarray:
@@ -164,13 +168,13 @@ def export_geometry_stages(
     Wj = ds.world_T_camera[j]
 
     Xw = tw.X_world_h[:3, :].T
-    valid = tw.cheiral_mask & np.all(np.isfinite(Xw), axis=1)
+    valid = np.all(np.isfinite(Xw), axis=1)
     scatter = project_points_topdown(Xw[valid] if np.any(valid) else np.zeros((0, 3)))
     repro = und_i.copy()
     Tcw_i = invert_se3(Wi)
     P = K @ np.hstack([Tcw_i[:3, :3], Tcw_i[:3, 3].reshape(3, 1)])
     for kk in range(tw.X_world_h.shape[1]):
-        if not tw.cheiral_mask[kk]:
+        if not np.all(np.isfinite(tw.X_world_h[:3, kk])):
             continue
         Xh = tw.X_world_h[:, kk : kk + 1]
         x = P @ Xh
@@ -195,12 +199,12 @@ def export_geometry_stages(
         pred_list = []
         gt_list = []
         for kk in range(tw.X_world_h.shape[1]):
-            if not tw.cheiral_mask[kk]:
-                continue
             X = tw.X_world_h[:3, kk]
+            if not np.all(np.isfinite(X)):
+                continue
             Tcw = invert_se3(Wi)
             Xc = Tcw[:3, :3] @ X + Tcw[:3, 3]
-            if Xc[2] <= CHEIRAL_MIN_Z:
+            if not np.isfinite(Xc[2]) or abs(Xc[2]) <= 1e-12:
                 continue
             u = int(K[0, 0] * (Xc[0] / Xc[2]) + K[0, 2])
             v = int(K[1, 1] * (Xc[1] / Xc[2]) + K[1, 2])
@@ -338,6 +342,7 @@ def export_all_stages(
     export_epipolar: bool = False,
 ) -> dict:
     """Single pair ``(i, j)`` into ``run_dir/steps/{single,pair,geometry}/``."""
+    _log_progress(f"dfm-export-steps: pair {i}-{j} -> {Path(run_dir).resolve()}")
     audit_path = rejection_audit_path if rejection_audit_path is not None else Path(run_dir) / "rejection_audit.jsonl"
     if Path(audit_path).exists():
         Path(audit_path).unlink()
@@ -355,9 +360,11 @@ def export_all_stages(
         detail_log=detail_log,
         export_epipolar=export_epipolar,
     )
+    _log_progress("dfm-export-steps: writing summary (pairs_all_rejection_types.json)")
     summary_dir = Path(run_dir) / "summary"
     summary_dir.mkdir(parents=True, exist_ok=True)
     write_pairs_all_rejection_types(summary_dir / "pairs_all_rejection_types.json", [record])
+    _log_progress("dfm-export-steps: done")
     return record
 
 
@@ -412,6 +419,7 @@ def export_sequence_consecutive_pairs(
         _, g = _undistort_if_needed(bgr, ds)
         grays.append(g)
 
+    _log_progress("dfm-export-steps: computing per-frame features …")
     frame_cache = compute_frame_features_cache(grays, fc)
 
     map_cfg = MapConfig(check_cheiral=check_cheiral)
@@ -425,9 +433,15 @@ def export_sequence_consecutive_pairs(
     fused = FusedLandmarkMap(merge_px=fuse_merge_px)
 
     pairs = iter_sequence_pairs(n, wl)
+    n_pairs = len(pairs)
+    _log_progress(
+        f"dfm-export-steps: {n} frames, {n_pairs} pairs (lookback={wl}) -> {root.resolve()}"
+    )
+    _log_progress("dfm-export-steps: computing per-frame features …")
     audit_records: list[dict] = []
     epipolar_views: list[EpipolarPairView] = []
-    for i, j in pairs:
+    for pair_idx, (i, j) in enumerate(pairs, start=1):
+        _log_progress(f"dfm-export-steps: pair {i}-{j} ({pair_idx}/{n_pairs}) …")
         tw = inc.add_frame_pair(
             i,
             j,
@@ -469,13 +483,22 @@ def export_sequence_consecutive_pairs(
             detail_log=detail_log,
             export_epipolar=False,
         )
+        n_tri = int(tw.X_world_h.shape[1]) if tw.X_world_h.size else 0
+        _log_progress(
+            f"dfm-export-steps: pair {i}-{j} done ({n_tri} triangulated cols, fused n={len(fused.landmarks)})"
+        )
         audit_records.append(record)
 
+    _log_progress(f"dfm-export-steps: finished {n_pairs} pairs, writing summary …")
+
     if export_epipolar and epipolar_views:
+        _log_progress(f"dfm-export-steps: writing epipolar PDFs ({len(epipolar_views)} pages) …")
         export_epipolar_pdf_bundle(root, epipolar_views)
 
+    _log_progress("dfm-export-steps: writing summary/pairs_all_rejection_types.json …")
     write_pairs_all_rejection_types(summary_root / "pairs_all_rejection_types.json", audit_records)
 
+    _log_progress("dfm-export-steps: writing summary/trajectory_topdown_full_sequence.png …")
     traj_full = render_trajectory_topdown(
         ds.world_T_camera,
         ds.gt_world_T_camera,
@@ -488,12 +511,13 @@ def export_sequence_consecutive_pairs(
 
     K = ds.calibration.K
     W0 = ds.world_T_camera[0]
+    nf = len(fused.landmarks)
+    _log_progress(f"dfm-export-steps: writing summary/fused_estimated_depth_ref000.png ({nf} landmarks) …")
     X_h, cheiral_pass = fused_world_points_homogeneous(fused)
     uv_f, z_f = project_world_points_to_camera_uv_z(X_h, cheiral_pass, K, W0)
     bgr0 = read_image_bgr(ds.image_paths[0])
     und0, _ = _undistort_if_needed(bgr0, ds)
     fused_depth = estimated_depth_visualization(und0, uv_f, z_f)
-    nf = len(fused.landmarks)
     cv2.putText(
         fused_depth,
         f"fused landmarks: {nf}",
@@ -519,10 +543,12 @@ def export_sequence_consecutive_pairs(
         2,
         cv2.LINE_AA,
     )
+    _log_progress("dfm-export-steps: writing summary/fused_landmarks_topdown.png …")
     fused_xy_path = summary_root / "fused_landmarks_topdown.png"
     if not cv2.imwrite(str(fused_xy_path), topdown):
         raise RuntimeError(f"failed to write {fused_xy_path}")
 
+    _log_progress("dfm-export-steps: done")
     return pairs
 
 

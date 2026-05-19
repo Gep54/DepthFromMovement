@@ -79,7 +79,6 @@ def audit_record(
         "i": i,
         "j": j,
         "counts": counts,
-        "has_all_rejection_types": (counts["epipolar"] > 0 and counts["cheiral"] > 0),
     }
 
 
@@ -90,11 +89,19 @@ def append_rejection_audit(path: str | Path, record: dict[str, Any]) -> None:
         f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
+def _has_all_rejection_types(counts: dict[str, int]) -> bool:
+    return counts.get("epipolar", 0) > 0 and counts.get("cheiral", 0) > 0
+
+
 def write_pairs_all_rejection_types(
     path: str | Path,
     records: list[dict[str, Any]],
 ) -> None:
-    pairs = [{"i": r["i"], "j": r["j"], "counts": r["counts"]} for r in records if r.get("has_all_rejection_types")]
+    pairs = [
+        {"i": r["i"], "j": r["j"], "counts": r["counts"]}
+        for r in records
+        if _has_all_rejection_types(r["counts"])
+    ]
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"pairs": pairs}, indent=2), encoding="utf-8")
