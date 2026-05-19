@@ -120,9 +120,10 @@ def _tf_rosbag_qos() -> QoSProfile:
 
 
 def _tf_static_live_qos() -> QoSProfile:
+    """TRANSIENT_LOCAL to match rosbag/live ``/tf_static``; depth>1 keeps all latched TFMessage samples."""
     return QoSProfile(
         history=HistoryPolicy.KEEP_LAST,
-        depth=1,
+        depth=32,
         reliability=ReliabilityPolicy.RELIABLE,
         durability=DurabilityPolicy.TRANSIENT_LOCAL,
     )
