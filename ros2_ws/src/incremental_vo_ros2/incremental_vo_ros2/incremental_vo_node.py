@@ -604,7 +604,7 @@ class IncrementalVoNode(Node):
         return T, pos
 
     def _current_metric_position(self) -> np.ndarray:
-        _, _, pos = self._fused_cam_to_world_and_pos()
+        _T, pos = self._fused_cam_to_world_and_pos()
         return pos
 
     def _travel_fraction_since_last_kf(self) -> float | None:
