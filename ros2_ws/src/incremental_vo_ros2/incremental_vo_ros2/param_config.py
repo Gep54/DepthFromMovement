@@ -61,6 +61,7 @@ KNOWN_PARAMETERS = frozenset(
         "tf_static_volatile_qos",
         "log_image_hz",
         "log_frame_transforms",
+        "log_random_triangulated_point",
         "feature_method",
         "feature_n_features",
         "descriptor_merge_beta",

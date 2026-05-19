@@ -198,6 +198,7 @@ class IncrementalVoNode(Node):
         self.declare_parameter("tf_static_volatile_qos", True)
         self.declare_parameter("log_image_hz", 0.0)
         self.declare_parameter("log_frame_transforms", False)
+        self.declare_parameter("log_random_triangulated_point", False)
 
         # Descriptor-based landmark fusion (replace-if-better descriptors + EMA position update).
         # Sentinel ``-1.0`` means "use DescriptorMapConfig.defaults(method)" / ``None`` for nullable
@@ -263,6 +264,11 @@ class IncrementalVoNode(Node):
         self._last_image_log_time = self.get_clock().now()
         self._log_frame_transforms = (
             self.get_parameter("log_frame_transforms").get_parameter_value().bool_value
+        )
+        self._log_random_triangulated_point = (
+            self.get_parameter("log_random_triangulated_point")
+            .get_parameter_value()
+            .bool_value
         )
 
         eval_param = self.get_parameter("eval_world_T_camera0").value
@@ -1309,8 +1315,58 @@ class IncrementalVoNode(Node):
                         f"Two-view {i}->{idx}: triangulated cols={tw.X_world_h.shape[1]} "
                         f"descriptor_landmarks_total={n_desc} reproj={tw.reproj!r}"
                     )
+                    if (
+                        self._log_random_triangulated_point
+                        and off == 1
+                        and tw.scale_ok
+                        and len(self._world_T_camera_raw) > i
+                    ):
+                        self._log_random_triangulated_point_debug(
+                            idx,
+                            tw,
+                            frame_i=i,
+                            world_T_camera_raw=self._world_T_camera_raw[i],
+                            world_T_drone_raw=self._world_T_drone_raw[i],
+                            max_range_world=max_range_world,
+                        )
                 except Exception as e:
                     self.get_logger().error(f"add_frame_pair failed for ({i}->{idx}): {e}")
+
+    def _log_random_triangulated_point_debug(
+        self,
+        keyframe_idx: int,
+        tw,
+        *,
+        frame_i: int,
+        world_T_camera_raw: np.ndarray,
+        world_T_drone_raw: np.ndarray,
+        max_range_world: float | None,
+    ) -> None:
+        from pipeline.triangulation_debug import (
+            format_triangulation_debug_line,
+            sample_random_integrate_point,
+        )
+
+        sampled = sample_random_integrate_point(
+            tw,
+            world_T_camera_raw=world_T_camera_raw,
+            world_T_drone_raw=world_T_drone_raw,
+            max_range_world=max_range_world,
+        )
+        if sampled is None:
+            return
+        col_k, X_cam, X_drone, X_world = sampled
+        self.get_logger().info(
+            format_triangulation_debug_line(
+                keyframe_idx=keyframe_idx,
+                frame_i=frame_i,
+                frame_j=tw.frame_j,
+                col_k=col_k,
+                X_cam=X_cam,
+                X_drone=X_drone,
+                X_world=X_world,
+            )
+        )
 
     def _publish_keyframe_z_marker(
         self,
