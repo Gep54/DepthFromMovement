@@ -11,6 +11,7 @@ from pipeline.config import FeatureConfig
 from pipeline.features import FrameFeatures, compute_frame_features_cache, detect_and_compute
 from pipeline.geometry import essential_from_world_poses, invert_se3
 from pipeline.map import IncrementalMap, MapConfig, TwoViewResult
+from pipeline.triangulation import CHEIRAL_MIN_Z
 from pipeline.fusion import FusedLandmarkMap, fused_world_points_homogeneous
 from viz.match_classification import (
     append_rejection_audit,
@@ -139,7 +140,7 @@ def export_geometry_stages(
             X = tw.X_world_h[:3, kk]
             Tcw = invert_se3(Wi)
             Xc = Tcw[:3, :3] @ X + Tcw[:3, 3]
-            if Xc[2] <= 1e-6:
+            if Xc[2] <= CHEIRAL_MIN_Z:
                 continue
             u = int(K[0, 0] * (Xc[0] / Xc[2]) + K[0, 2])
             v = int(K[1, 1] * (Xc[1] / Xc[2]) + K[1, 2])

@@ -7,6 +7,7 @@ import numpy as np
 from scipy.interpolate import griddata
 
 from pipeline.geometry import invert_se3
+from pipeline.triangulation import CHEIRAL_MIN_Z
 
 # Sparse halos on the dark panel stay compact; photo overlay uses a larger disk for visibility.
 DEFAULT_DEPTH_HALO_RADIUS_SPARSE_PX = 5
@@ -229,7 +230,7 @@ def project_world_points_to_camera_uv_z(
     t = Tcw[:3, 3].reshape(3, 1)
     Xc = R @ X + t
     z = Xc[2, :]
-    front = z > 1e-6
+    front = z > CHEIRAL_MIN_Z
     Xc = Xc[:, front]
     z = z[front]
     if z.size == 0:

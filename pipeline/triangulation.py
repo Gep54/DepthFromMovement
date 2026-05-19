@@ -5,6 +5,34 @@ import numpy as np
 
 from pipeline.geometry import invert_se3
 
+# Minimum positive depth (metres) along +Z in each camera frame; points at or behind fail cheirality.
+CHEIRAL_MIN_Z = 1e-6  # 0.000001
+
+
+def cheiral_mask_cam_frames(
+    X_cam1: np.ndarray,
+    R_c1_c2: np.ndarray,
+    t_c1_c2: np.ndarray,
+    *,
+    min_z: float = CHEIRAL_MIN_Z,
+) -> np.ndarray:
+    """
+    True where the 3D point lies in front of both cameras (positive Z in each frame).
+
+    ``X_cam1`` is (3, N) in camera-1 coordinates. ``R_c1_c2``, ``t_c1_c2`` follow OpenCV
+    ``recoverPose`` / ``triangulatePoints``: ``X_c1 = R @ X_c2 + t``, so
+    ``X_c2 = R.T @ (X_c1 - t)``.
+    """
+    Xc = np.asarray(X_cam1, dtype=np.float64)
+    if Xc.ndim != 2 or Xc.shape[0] != 3:
+        raise ValueError(f"X_cam1 must be (3, N), got {Xc.shape}")
+    R = np.asarray(R_c1_c2, dtype=np.float64).reshape(3, 3)
+    t = np.asarray(t_c1_c2, dtype=np.float64).reshape(3, 1)
+    z1 = Xc[2, :]
+    X_cam2 = R.T @ (Xc - t)
+    z2 = X_cam2[2, :]
+    return (z1 > min_z) & (z2 > min_z)
+
 
 def _projection_k_rt(K: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
     """P = K[R|t] with X_cam = R @ X_world + t (column t)."""
@@ -33,7 +61,7 @@ def triangulate_cam1_frame(
     Triangulate in camera-1 frame: P1=K[I|0], P2=K[R|t] with X_c2 expressed from X_c1
     as in OpenCV ``recoverPose`` / ``triangulatePoints`` convention.
 
-    Returns homogeneous (4,N) in camera-1 coordinates + cheirality mask (positive Z in cam1).
+    Returns homogeneous (4,N) in camera-1 coordinates + cheirality mask (Z > CHEIRAL_MIN_Z in cam1 and cam2).
     """
     P1 = _projection_k_rt(K, np.eye(3, dtype=np.float64), np.zeros(3, dtype=np.float64))
     P2 = _projection_k_rt(K, R_c1_c2, t_c1_c2.ravel())
@@ -42,7 +70,7 @@ def triangulate_cam1_frame(
     X_h = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)
     X_h = X_h / (X_h[3:4, :] + 1e-12)
     Xc = X_h[:3, :]
-    mask = Xc[2, :] > 1e-6
+    mask = cheiral_mask_cam_frames(Xc, R_c1_c2, t_c1_c2)
     return X_h, mask
 
 
@@ -68,7 +96,7 @@ def triangulate_world_points(
     Triangulate homogeneous world points (4,N) from two views.
 
     Poses are **camera→world** (``motion.json`` convention).
-    Returns ``(Xw_h, depth_positive_mask)`` where mask uses positive depth in cam1.
+    Returns ``(Xw_h, cheiral_mask)`` where mask requires Z > CHEIRAL_MIN_Z in both cameras.
     """
     P1 = world_points_projection_matrix(K, world_T_c1)
     P2 = world_points_projection_matrix(K, world_T_c2)
@@ -77,9 +105,9 @@ def triangulate_world_points(
     X_h = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)
     X_h = X_h / (X_h[3:4, :] + 1e-12)
     Xw = X_h[:3, :]
-    Tcw = invert_se3(world_T_c1)
-    R1 = Tcw[:3, :3]
-    t1 = Tcw[:3, 3].reshape(3, 1)
-    z1 = (R1 @ Xw + t1)[2, :]
-    mask = z1 > 1e-6
+    Tcw1 = invert_se3(world_T_c1)
+    Tcw2 = invert_se3(world_T_c2)
+    z1 = (Tcw1[:3, :3] @ Xw + Tcw1[:3, 3].reshape(3, 1))[2, :]
+    z2 = (Tcw2[:3, :3] @ Xw + Tcw2[:3, 3].reshape(3, 1))[2, :]
+    mask = (z1 > CHEIRAL_MIN_Z) & (z2 > CHEIRAL_MIN_Z)
     return X_h, mask
