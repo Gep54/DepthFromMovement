@@ -30,10 +30,21 @@ def main() -> None:
         help="Override max Hamming (ORB) or L2 (SIFT) for associating observations to landmarks",
     )
     p.add_argument(
+        "--no-fusion",
+        action="store_true",
+        help="Disable descriptor landmark fusion (append-only map)",
+    )
+    p.add_argument(
+        "--fusion-baseline-factor",
+        type=float,
+        default=None,
+        help="3D merge radius = factor × pair baseline (m); default 0.25 from config",
+    )
+    p.add_argument(
         "--spatial-merge-radius-m",
         type=float,
         default=None,
-        help="3D merge gate radius in cam0 (m); omit to use descriptor_map.json or disable",
+        help="Fixed 3D merge radius (m); overrides --fusion-baseline-factor",
     )
     p.add_argument(
         "--descriptor-map-config",
@@ -52,6 +63,10 @@ def main() -> None:
         cfg_path = Path(args.dataset_root) / "descriptor_map.json"
     desc_cfg = load_descriptor_map_json(Path(cfg_path), ds.feature_config.method)
 
+    if args.no_fusion:
+        desc_cfg = replace(desc_cfg, fusion_enabled=False)
+    if args.fusion_baseline_factor is not None:
+        desc_cfg = replace(desc_cfg, spatial_merge_baseline_factor=float(args.fusion_baseline_factor))
     if args.merge_beta is not None:
         desc_cfg = replace(desc_cfg, merge_beta=float(args.merge_beta))
     if args.descriptor_max_dist is not None:

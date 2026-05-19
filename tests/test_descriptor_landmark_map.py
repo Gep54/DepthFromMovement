@@ -12,6 +12,7 @@ from pipeline.descriptor_landmark_map import (
     DescriptorMapConfig,
     descriptor_distance,
     export_landmarks_csv,
+    merge_radius_from_pair_baseline,
     point_camera_to_drone_to_world,
     within_merge_sphere,
     world_point_to_camera_frame,
@@ -101,6 +102,79 @@ def test_descriptor_distance_orb() -> None:
     a = np.zeros((32,), dtype=np.uint8)
     b = a.copy()
     assert descriptor_distance(a, b, "ORB") == 0.0
+
+
+def test_fusion_disabled_appends_separate_landmarks() -> None:
+    cfg = DescriptorMapConfig(
+        method="ORB",
+        fusion_enabled=False,
+        merge_beta=None,
+        max_match_distance=8.0,
+    )
+    m = DescriptorLandmarkMap(cfg)
+    W_cam, W_drone = _identity_poses()
+    d = np.zeros((32,), dtype=np.uint8)
+    m.integrate(
+        _tw_from_z(2.0, d),
+        world_T_camera_raw=W_cam,
+        world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam,
+    )
+    m.integrate(
+        _tw_from_z(2.0, d),
+        world_T_camera_raw=W_cam,
+        world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam,
+    )
+    assert len(m.landmarks) == 2
+
+
+def test_merge_radius_from_pair_baseline_factor() -> None:
+    assert merge_radius_from_pair_baseline(4.0, baseline_factor=0.25) == 1.0
+    assert merge_radius_from_pair_baseline(4.0, baseline_factor=0.25, fixed_radius_m=2.0) == 2.0
+
+
+def test_spatial_merge_uses_pair_baseline_factor() -> None:
+    cfg = DescriptorMapConfig(
+        method="ORB",
+        merge_beta=None,
+        max_match_distance=256.0,
+        spatial_merge_baseline_factor=0.25,
+    )
+    m = DescriptorLandmarkMap(cfg)
+    W_cam, W_drone = _identity_poses()
+    d = np.zeros((32,), dtype=np.uint8)
+    m.integrate(
+        _tw_single_point(2.0, d),
+        world_T_camera_raw=W_cam,
+        world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam,
+        pair_baseline_m=4.0,
+    )
+    m.integrate(
+        _tw_single_point(2.5, d),
+        world_T_camera_raw=W_cam,
+        world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam,
+        pair_baseline_m=4.0,
+    )
+    assert len(m.landmarks) == 1
+    m2 = DescriptorLandmarkMap(cfg)
+    m2.integrate(
+        _tw_single_point(2.0, d),
+        world_T_camera_raw=W_cam,
+        world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam,
+        pair_baseline_m=4.0,
+    )
+    m2.integrate(
+        _tw_single_point(10.0, d),
+        world_T_camera_raw=W_cam,
+        world_T_drone_raw=W_drone,
+        world_T_camera_j_raw=W_cam,
+        pair_baseline_m=4.0,
+    )
+    assert len(m2.landmarks) == 2
 
 
 def test_within_merge_sphere() -> None:

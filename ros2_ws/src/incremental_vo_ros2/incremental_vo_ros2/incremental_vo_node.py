@@ -205,6 +205,9 @@ class IncrementalVoNode(Node):
         # fields; sentinel -1.0 selects DescriptorMapConfig.defaults(method).
         self.declare_parameter("feature_method", "ORB")
         self.declare_parameter("feature_n_features", 2000)
+        self.declare_parameter("descriptor_fusion_enabled", True)
+        self.declare_parameter("descriptor_spatial_merge_baseline_factor", 0.25)
+        self.declare_parameter("descriptor_spatial_merge_radius_m", -1.0)
         self.declare_parameter("descriptor_merge_beta", -1.0)
         self.declare_parameter("descriptor_max_match_distance", -1.0)
         self.declare_parameter("descriptor_ratio_second_best", -1.0)
@@ -284,6 +287,17 @@ class IncrementalVoNode(Node):
             )
             self._feature_method = "ORB"
         self._feature_n = max(1, int(self.get_parameter("feature_n_features").value))
+        self._descriptor_fusion_enabled = (
+            self.get_parameter("descriptor_fusion_enabled").get_parameter_value().bool_value
+        )
+        self._descriptor_spatial_merge_baseline_factor = float(
+            self.get_parameter("descriptor_spatial_merge_baseline_factor")
+            .get_parameter_value()
+            .double_value
+        )
+        self._descriptor_spatial_merge_radius_m = float(
+            self.get_parameter("descriptor_spatial_merge_radius_m").get_parameter_value().double_value
+        )
         self._descriptor_merge_beta = float(
             self.get_parameter("descriptor_merge_beta").get_parameter_value().double_value
         )
@@ -611,6 +625,16 @@ class IncrementalVoNode(Node):
         )
 
         desc_cfg = DescriptorMapConfig.defaults(self._feature_method)
+        desc_cfg = dc_replace(desc_cfg, fusion_enabled=self._descriptor_fusion_enabled)
+        if self._descriptor_spatial_merge_baseline_factor >= 0.0:
+            desc_cfg = dc_replace(
+                desc_cfg,
+                spatial_merge_baseline_factor=self._descriptor_spatial_merge_baseline_factor,
+            )
+        if self._descriptor_spatial_merge_radius_m >= 0.0:
+            desc_cfg = dc_replace(
+                desc_cfg, spatial_merge_radius_m=self._descriptor_spatial_merge_radius_m
+            )
         if self._descriptor_max_match_distance >= 0.0:
             desc_cfg = dc_replace(desc_cfg, max_match_distance=self._descriptor_max_match_distance)
         if self._descriptor_merge_beta >= 0.0:
@@ -621,6 +645,9 @@ class IncrementalVoNode(Node):
         self._effective_desc_cfg = desc_cfg
         self.get_logger().info(
             f"Descriptor map: method={self._feature_method} "
+            f"fusion_enabled={desc_cfg.fusion_enabled} "
+            f"spatial_merge_baseline_factor={desc_cfg.spatial_merge_baseline_factor} "
+            f"spatial_merge_radius_m={desc_cfg.spatial_merge_radius_m} "
             f"merge_beta={desc_cfg.merge_beta} "
             f"max_match_distance={desc_cfg.max_match_distance} "
             f"ratio_second_best={desc_cfg.ratio_second_best}"
@@ -1280,6 +1307,8 @@ class IncrementalVoNode(Node):
             max_range_world = max_sparse_range_m(baseline_m, self._sparse_map_range_factor)
 
         if idx >= 1 and self._inc_map is not None:
+            from pipeline.descriptor_landmark_map import pose_translation_baseline_m
+
             for off in range(1, min(self._pair_lookback, idx) + 1):
                 i = idx - off
                 try:
@@ -1292,13 +1321,16 @@ class IncrementalVoNode(Node):
                         and len(self._world_T_camera_raw) > i
                     ):
                         try:
+                            pair_baseline_m = pose_translation_baseline_m(
+                                self._world_T_camera[i], self._world_T_camera[idx]
+                            )
                             self._desc_map.integrate(
                                 tw,
                                 world_T_camera_raw=self._world_T_camera_raw[i],
                                 world_T_drone_raw=self._world_T_drone_raw[i],
                                 world_T_camera_j_raw=self._world_T_camera_raw[idx],
                                 max_range_world=max_range_world,
-                                spatial_merge_radius_m=self._d,
+                                pair_baseline_m=pair_baseline_m,
                             )
                         except Exception as ex:
                             self.get_logger().warn(

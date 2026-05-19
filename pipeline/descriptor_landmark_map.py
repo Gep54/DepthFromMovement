@@ -48,6 +48,29 @@ def within_merge_sphere(p: np.ndarray, q: np.ndarray, radius_m: float) -> bool:
     )
 
 
+def pose_translation_baseline_m(world_T_a: np.ndarray, world_T_b: np.ndarray) -> float:
+    """Translation norm between two ``world_T_camera`` poses (pair baseline in metres)."""
+    ta = np.asarray(world_T_a, dtype=np.float64)[:3, 3]
+    tb = np.asarray(world_T_b, dtype=np.float64)[:3, 3]
+    return float(np.linalg.norm(tb - ta))
+
+
+def merge_radius_from_pair_baseline(
+    pair_baseline_m: float,
+    *,
+    baseline_factor: float,
+    fixed_radius_m: float | None = None,
+    min_baseline_m: float = 1e-3,
+) -> float | None:
+    """Merge radius from ``baseline_factor * pair_baseline`` unless ``fixed_radius_m >= 0``."""
+    if fixed_radius_m is not None and fixed_radius_m >= 0.0:
+        return float(fixed_radius_m)
+    if baseline_factor <= 0.0:
+        return None
+    b = max(float(pair_baseline_m), float(min_baseline_m))
+    return float(baseline_factor) * b
+
+
 def distance_from_anchor(X_world: np.ndarray, anchor_xyz: np.ndarray) -> float:
     """Euclidean distance from a world point to an anchor (e.g. current camera position)."""
     return float(
@@ -70,14 +93,18 @@ class DescriptorMapConfig:
     """Landmark fusion settings; ``merge_beta=None`` uses mean-equivalent weights ``1/(n+1)``."""
 
     method: Literal["ORB", "SIFT"] = "ORB"
+    fusion_enabled: bool = True
+    """If false, every observation appends a new landmark (no descriptor/position merge)."""
     merge_beta: float | None = None
     r"""Fixed EMA beta in (0,1]; ``None`` uses ``1/(n_updates+1)`` (incremental mean)."""
     max_match_distance: float = 64.0
     """ORB: Hamming threshold; SIFT: L2 threshold."""
     ratio_second_best: float | None = None
     """If set, require ``best < ratio * second`` (Lowe-style)."""
+    spatial_merge_baseline_factor: float = 0.25
+    """Default merge radius = factor × pair baseline (m) when ``spatial_merge_radius_m`` is unset."""
     spatial_merge_radius_m: float | None = None
-    """If set, descriptor matches merge only when 3D distance in world <= this value."""
+    """Fixed merge radius (m); overrides ``spatial_merge_baseline_factor`` when set."""
 
     @staticmethod
     def defaults(method: Literal["ORB", "SIFT"]) -> DescriptorMapConfig:
@@ -156,6 +183,24 @@ class DescriptorLandmarkMap:
             return None
         return Xw.astype(np.float64)
 
+    def _resolve_spatial_merge_radius(
+        self,
+        *,
+        pair_baseline_m: float | None,
+        spatial_merge_radius_m: float | None,
+    ) -> float | None:
+        if spatial_merge_radius_m is not None:
+            return float(spatial_merge_radius_m) if spatial_merge_radius_m > 0 else None
+        if self.cfg.spatial_merge_radius_m is not None:
+            r = float(self.cfg.spatial_merge_radius_m)
+            return r if r > 0 else None
+        if pair_baseline_m is None:
+            return None
+        return merge_radius_from_pair_baseline(
+            pair_baseline_m,
+            baseline_factor=self.cfg.spatial_merge_baseline_factor,
+        )
+
     def integrate(
         self,
         tw: TwoViewResult,
@@ -164,7 +209,9 @@ class DescriptorLandmarkMap:
         world_T_drone_raw: np.ndarray,
         world_T_camera_j_raw: np.ndarray,
         max_range_world: float | None = None,
+        pair_baseline_m: float | None = None,
         spatial_merge_radius_m: float | None = None,
+        fusion_enabled: bool | None = None,
     ) -> None:
         """Ingest triangulated points; camera→drone→world transform after cheirality.
 
@@ -182,10 +229,10 @@ class DescriptorLandmarkMap:
         W_drone = np.asarray(world_T_drone_raw, dtype=np.float64)
         W_cam_j = np.asarray(world_T_camera_j_raw, dtype=np.float64)
         range_anchor = W_cam_j[:3, 3].copy()
-        radius = (
-            spatial_merge_radius_m
-            if spatial_merge_radius_m is not None
-            else self.cfg.spatial_merge_radius_m
+        do_fusion = self.cfg.fusion_enabled if fusion_enabled is None else bool(fusion_enabled)
+        radius = self._resolve_spatial_merge_radius(
+            pair_baseline_m=pair_baseline_m,
+            spatial_merge_radius_m=spatial_merge_radius_m,
         )
 
         for k in range(n):
@@ -198,6 +245,10 @@ class DescriptorLandmarkMap:
             if max_range_world is not None and distance_from_anchor(X_world, range_anchor) > max_range_world:
                 continue
             d_obs = tw.descriptors[k]
+
+            if not do_fusion:
+                self._append_landmark(X_world, d_obs)
+                continue
 
             best_i, best_d, second_d = self._nearest_landmark(d_obs)
 

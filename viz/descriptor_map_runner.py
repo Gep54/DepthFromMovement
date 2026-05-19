@@ -9,6 +9,7 @@ from data.dataset import Dataset, read_image_bgr
 from pipeline.descriptor_landmark_map import (
     DescriptorLandmarkMap,
     DescriptorMapConfig,
+    pose_translation_baseline_m,
     world_point_to_camera_frame,
 )
 from pipeline.features import compute_frame_features_cache
@@ -119,7 +120,7 @@ def run_descriptor_landmark_pipeline(
             world_T_camera_raw=W_i,
             world_T_drone_raw=W_i,
             world_T_camera_j_raw=W_j,
-            spatial_merge_radius_m=desc_cfg.spatial_merge_radius_m,
+            pair_baseline_m=pose_translation_baseline_m(W_i, W_j),
         )
         if save_iter_viz:
             _write_snapshot(iter_root, ds, desc_map, step_idx, i, j)
