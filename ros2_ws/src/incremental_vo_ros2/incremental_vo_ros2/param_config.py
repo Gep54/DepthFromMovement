@@ -60,6 +60,7 @@ KNOWN_PARAMETERS = frozenset(
         "tf_use_latest_time",
         "tf_static_volatile_qos",
         "log_image_hz",
+        "log_frame_transforms",
         "feature_method",
         "feature_n_features",
         "descriptor_merge_beta",

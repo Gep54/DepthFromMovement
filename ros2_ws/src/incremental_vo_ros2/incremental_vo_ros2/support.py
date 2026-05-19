@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -22,6 +23,10 @@ from incremental_vo_ros2.image_buffer import (
     ros_image_to_gray,
     should_buffer_image,
 )
+from incremental_vo_ros2.frame_transform_debug import (
+    drone_T_camera_from_world_poses,
+    format_se3_4x4,
+)
 from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
 from incremental_vo_ros2.range_gate import (
     consecutive_keyframe_baseline_m,
@@ -34,8 +39,11 @@ __all__ = [
     "camera_info_to_calibration",
     "consecutive_keyframe_baseline_m",
     "copy_image_msg",
+    "drone_T_camera_from_world_poses",
     "ensure_pipeline_on_path",
     "eval_world_T_camera0_from_parameter",
+    "format_se3_4x4",
+    "log_frame_transforms_block",
     "image_msg_to_gray_undistorted",
     "max_sparse_range_m",
     "should_reset_bag_replay",
@@ -115,6 +123,31 @@ def odom_to_cam_to_world_T(msg: Odometry) -> np.ndarray:
     T[:3, :3] = quat_msg_to_mat(q)
     T[:3, 3] = (p.x, p.y, p.z)
     return T
+
+
+def log_frame_transforms_block(
+    logger: Any,
+    *,
+    idx: int,
+    pose_source: str,
+    world_frame: str,
+    drone_frame: str,
+    camera_frame: str,
+    world_T_drone: np.ndarray,
+    world_T_camera: np.ndarray,
+) -> None:
+    """Log ``world_T_drone``, ``drone_T_camera``, and ``world_T_camera`` on keyframe 0."""
+    drone_T_cam = drone_T_camera_from_world_poses(world_T_drone, world_T_camera)
+    lines = [
+        f"Keyframe {idx} frame transforms (pose_source={pose_source!r}):",
+        f"world_T_drone  [child={drone_frame} -> parent={world_frame}]:",
+        format_se3_4x4(world_T_drone),
+        f"drone_T_camera [child={camera_frame} -> parent={drone_frame}]:",
+        format_se3_4x4(drone_T_cam),
+        f"world_T_camera [child={camera_frame} -> parent={world_frame}]:",
+        format_se3_4x4(world_T_camera),
+    ]
+    logger.info("\n".join(lines))
 
 
 def odom_position_xyz(msg: Odometry) -> np.ndarray:

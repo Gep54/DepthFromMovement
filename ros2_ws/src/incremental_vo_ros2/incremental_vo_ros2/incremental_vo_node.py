@@ -42,6 +42,7 @@ from incremental_vo_ros2.support import (
     ensure_pipeline_on_path,
     eval_world_T_camera0_from_parameter,
     image_msg_to_gray_undistorted,
+    log_frame_transforms_block,
     max_sparse_range_m,
     odom_to_cam_to_world_T,
     should_reset_bag_replay,
@@ -196,6 +197,7 @@ class IncrementalVoNode(Node):
         self.declare_parameter("tf_use_latest_time", False)
         self.declare_parameter("tf_static_volatile_qos", True)
         self.declare_parameter("log_image_hz", 0.0)
+        self.declare_parameter("log_frame_transforms", False)
 
         # Descriptor-based landmark fusion (replace-if-better descriptors + EMA position update).
         # Sentinel ``-1.0`` means "use DescriptorMapConfig.defaults(method)" / ``None`` for nullable
@@ -259,6 +261,9 @@ class IncrementalVoNode(Node):
         log_hz = self.get_parameter("log_image_hz").get_parameter_value().double_value
         self._image_log_interval_s = 1.0 / log_hz if log_hz > 0.0 else math.inf
         self._last_image_log_time = self.get_clock().now()
+        self._log_frame_transforms = (
+            self.get_parameter("log_frame_transforms").get_parameter_value().bool_value
+        )
 
         eval_param = self.get_parameter("eval_world_T_camera0").value
         eval_seq = eval_param if isinstance(eval_param, (list, tuple)) else []
@@ -1231,6 +1236,24 @@ class IncrementalVoNode(Node):
         self._last_kf_pos = bf.pos_odom.copy()
         parent_frame = self._camera_pose_debug_parent_frame() or "world"
         self._log_keyframe0_optical_axes(idx, bf.cam_to_world, parent_frame, pose_src)
+        if self._log_frame_transforms and idx == 0 and self._last_odom is not None:
+            world_frame = self._normalize_tf_frame(self._last_odom.header.frame_id) or parent_frame
+            drone_frame = self._odom_child_frame_id(self._last_odom) or "?"
+            camera_frame = (
+                self._resolved_camera_frame
+                or self._normalize_tf_frame(self._camera_frame)
+                or "?"
+            )
+            log_frame_transforms_block(
+                self.get_logger(),
+                idx=idx,
+                pose_source=pose_src,
+                world_frame=world_frame,
+                drone_frame=drone_frame,
+                camera_frame=camera_frame,
+                world_T_drone=self._world_T_drone_raw[-1],
+                world_T_camera=bf.cam_to_world,
+            )
 
         saved = log_path or f"keyframe {idx} (no image export)"
         msg = (
