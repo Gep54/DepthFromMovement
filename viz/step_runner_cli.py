@@ -48,7 +48,7 @@ def main() -> None:
     p.add_argument(
         "--epipolar",
         action="store_true",
-        help="Per pair: steps/epipolar/ PNGs (all matches, best 5 stacked, worst 5 stacked)",
+        help="Per pair: steps/epipolar/ PNGs (all matches, best/worst 5 on one image pair)",
     )
     p.add_argument(
         "--no-cheiral",

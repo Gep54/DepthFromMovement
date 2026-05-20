@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,166 @@ def _camera_forward_xy(T: np.ndarray, length_m: float = 0.08) -> np.ndarray:
 def _rotation_magnitude_deg(R: np.ndarray) -> float:
     rvec, _ = cv2.Rodrigues(np.asarray(R, dtype=np.float64))
     return float(np.linalg.norm(rvec.ravel()) * 180.0 / np.pi)
+
+
+def _nice_scale_length_m(target_m: float) -> float:
+    """Round ``target_m`` to a readable scale-bar length (1–2–5 decades)."""
+    if target_m <= 0.0:
+        return 0.1
+    exp = math.floor(math.log10(target_m))
+    base = target_m / (10.0**exp)
+    if base < 1.5:
+        nice = 1.0
+    elif base < 3.5:
+        nice = 2.0
+    elif base < 7.5:
+        nice = 5.0
+    else:
+        nice = 10.0
+    return float(nice * (10.0**exp))
+
+
+def _tick_step_m(span_m: float) -> float:
+    return _nice_scale_length_m(max(span_m / 4.0, 1e-6))
+
+
+class _WorldXYPlot:
+    """Equal-aspect top-down plot: world +X right, world +Y up on screen."""
+
+    def __init__(
+        self,
+        plot: np.ndarray,
+        points_xy: np.ndarray,
+        *,
+        pad: int = 56,
+    ) -> None:
+        h, w = plot.shape[:2]
+        self._plot = plot
+        self._pad = pad
+        self._w = w
+        self._h = h
+
+        mn = np.min(points_xy, axis=0)
+        mx = np.max(points_xy, axis=0)
+        center = 0.5 * (mn + mx)
+        half = 0.5 * max(float(mx[0] - mn[0]), float(mx[1] - mn[1]), 1e-6)
+        half *= 1.28
+        self.mn = center - half
+        self.mx = center + half
+        self.span = float(self.mx[0] - self.mn[0])
+
+        inner_w = max(1, w - 2 * pad)
+        inner_h = max(1, h - 2 * pad)
+        self.px_per_m = min(inner_w / self.span, inner_h / self.span)
+
+    def proj(self, p: np.ndarray) -> tuple[int, int]:
+        p = np.asarray(p, dtype=np.float64).reshape(2)
+        x = int(self._pad + (p[0] - self.mn[0]) * self.px_per_m)
+        y = int(self._h - self._pad - (p[1] - self.mn[1]) * self.px_per_m)
+        return x, y
+
+    def draw_axes(self, wf: str) -> None:
+        """World +X / +Y reference arrows at the plot corner (metric, not camera frame)."""
+        ox, oy = self.mn[0] + 0.06 * self.span, self.mn[1] + 0.06 * self.span
+        axis_len = max(0.12 * self.span, 0.05)
+        o = np.array([ox, oy], dtype=np.float64)
+        px_x = self.proj(o + np.array([axis_len, 0.0]))
+        px_y = self.proj(o + np.array([0.0, axis_len]))
+        p0 = self.proj(o)
+        col_axis = (70, 70, 70)
+        cv2.arrowedLine(self._plot, p0, px_x, col_axis, 2, tipLength=0.18, line_type=cv2.LINE_AA)
+        cv2.arrowedLine(self._plot, p0, px_y, col_axis, 2, tipLength=0.18, line_type=cv2.LINE_AA)
+        cv2.putText(
+            self._plot,
+            "+X",
+            (px_x[0] + 4, px_x[1] + 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            col_axis,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            self._plot,
+            "+Y",
+            (px_y[0] + 4, px_y[1] - 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            col_axis,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            self._plot,
+            f"axes: {wf}",
+            (p0[0], p0[1] + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (90, 90, 90),
+            1,
+            cv2.LINE_AA,
+        )
+
+    def draw_grid_ticks(self) -> None:
+        step = _tick_step_m(self.span)
+        x0 = math.ceil(self.mn[0] / step) * step
+        y0 = math.ceil(self.mn[1] / step) * step
+        col_grid = (220, 220, 220)
+        col_tick = (110, 110, 110)
+        x = x0
+        while x <= self.mx[0] + 1e-9:
+            p0 = self.proj(np.array([x, self.mn[1]]))
+            p1 = self.proj(np.array([x, self.mx[1]]))
+            cv2.line(self._plot, p0, p1, col_grid, 1, cv2.LINE_AA)
+            cv2.putText(
+                self._plot,
+                f"{x:.2f}",
+                (p0[0] - 18, self._h - 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                col_tick,
+                1,
+                cv2.LINE_AA,
+            )
+            x += step
+        y = y0
+        while y <= self.mx[1] + 1e-9:
+            p0 = self.proj(np.array([self.mn[0], y]))
+            p1 = self.proj(np.array([self.mx[0], y]))
+            cv2.line(self._plot, p0, p1, col_grid, 1, cv2.LINE_AA)
+            cv2.putText(
+                self._plot,
+                f"{y:.2f}",
+                (8, p0[1] + 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                col_tick,
+                1,
+                cv2.LINE_AA,
+            )
+            y += step
+
+    def draw_scale_bar(self) -> None:
+        target_px = 100.0
+        bar_m = _nice_scale_length_m(target_px / self.px_per_m)
+        bar_px = int(bar_m * self.px_per_m)
+        x0 = self._w - self._pad - bar_px - 20
+        y0 = self._h - 28
+        x1 = x0 + bar_px
+        cv2.line(self._plot, (x0, y0), (x1, y0), (30, 30, 30), 3, cv2.LINE_AA)
+        cv2.line(self._plot, (x0, y0 - 6), (x0, y0 + 6), (30, 30, 30), 2, cv2.LINE_AA)
+        cv2.line(self._plot, (x1, y0 - 6), (x1, y0 + 6), (30, 30, 30), 2, cv2.LINE_AA)
+        label = f"{bar_m:g} m"
+        cv2.putText(
+            self._plot,
+            label,
+            (x0, y0 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (30, 30, 30),
+            1,
+            cv2.LINE_AA,
+        )
 
 
 def compute_pair_pose_delta(
@@ -93,7 +254,7 @@ def render_pair_pose_delta(
     width: int = 1024,
     height: int = 512,
 ) -> np.ndarray:
-    """BGR figure: top-down XY plot (left) and numeric summary (right)."""
+    """BGR figure: top-down world XY (left) and numeric summary (right)."""
     plot_w = height
     canvas = np.ones((height, width, 3), dtype=np.uint8) * 255
     plot = canvas[:, :plot_w]
@@ -101,50 +262,86 @@ def render_pair_pose_delta(
 
     ci = _camera_center_world(world_T_i)
     cj = _camera_center_world(world_T_j)
+    delta_w = np.asarray(summary["translation_world_m"], dtype=np.float64)
     tips = np.array([_camera_forward_xy(world_T_i), _camera_forward_xy(world_T_j)], dtype=np.float64)
-    pts_xy = np.vstack([ci[:2], cj[:2], tips])
-    mn = np.min(pts_xy, axis=0)
-    mx = np.max(pts_xy, axis=0)
-    span = np.maximum(mx - mn, 1e-6)
-    margin = 0.35
-    mn = mn - span * margin
-    mx = mx + span * margin
-    span = mx - mn
+    pts_xy = np.vstack([ci[:2], cj[:2], ci[:2] + delta_w[:2], tips])
 
-    def proj(p: np.ndarray) -> tuple[int, int]:
-        x = int((p[0] - mn[0]) / span[0] * (plot_w - 40) + 20)
-        y = int((1.0 - (p[1] - mn[1]) / span[1]) * (height - 40) + 20)
-        return x, y
+    wf = str(summary.get("world_frame", "world"))
+    xy = _WorldXYPlot(plot, pts_xy)
+    xy.draw_grid_ticks()
+    xy.draw_axes(wf)
+    xy.draw_scale_bar()
 
-    p_i = proj(ci[:2])
-    p_j = proj(cj[:2])
-    cv2.arrowedLine(plot, p_i, p_j, (40, 40, 220), 3, tipLength=0.12, line_type=cv2.LINE_AA)
-    for label, T, color in (
-        (f"i={summary['frame_i']}", world_T_i, (200, 80, 80)),
-        (f"j={summary['frame_j']}", world_T_j, (80, 80, 200)),
-    ):
-        p0 = proj(_camera_center_world(T)[:2])
-        p1 = proj(_camera_forward_xy(T))
-        cv2.arrowedLine(plot, p0, p1, color, 2, tipLength=0.25, line_type=cv2.LINE_AA)
-        cv2.circle(plot, p0, 10, color, -1, cv2.LINE_AA)
-        cv2.putText(plot, label, (p0[0] + 12, p0[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2, cv2.LINE_AA)
-        cv2.putText(plot, label, (p0[0] + 12, p0[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
-
-    wf = summary.get("world_frame", "world")
+    p_i = xy.proj(ci[:2])
+    p_j = xy.proj(cj[:2])
+    dw_norm = float(np.linalg.norm(delta_w))
+    motion_color = (30, 140, 30)  # green: world translation j-i
+    cv2.arrowedLine(plot, p_i, p_j, motion_color, 4, tipLength=0.15, line_type=cv2.LINE_AA)
+    mid = ((p_i[0] + p_j[0]) // 2, (p_i[1] + p_j[1]) // 2)
     cv2.putText(
         plot,
-        f"top-down XY ({wf})",
-        (12, 28),
+        f"Delta t world ({dw_norm:.3f} m)",
+        (mid[0] + 10, mid[1] - 10),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (60, 60, 60),
+        0.5,
+        motion_color,
+        2,
+        cv2.LINE_AA,
+    )
+
+    for label, T, color in (
+        (f"i={summary['frame_i']}", world_T_i, (60, 60, 220)),
+        (f"j={summary['frame_j']}", world_T_j, (220, 60, 60)),
+    ):
+        p0 = xy.proj(_camera_center_world(T)[:2])
+        p1 = xy.proj(_camera_forward_xy(T))
+        cv2.arrowedLine(plot, p0, p1, color, 2, tipLength=0.25, line_type=cv2.LINE_AA)
+        cv2.circle(plot, p0, 9, color, -1, cv2.LINE_AA)
+        cv2.putText(
+            plot,
+            label,
+            (p0[0] + 12, p0[1] - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            plot,
+            label,
+            (p0[0] + 12, p0[1] - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.putText(
+        plot,
+        f"top-down world XY  ({wf})",
+        (12, 26),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.62,
+        (40, 40, 40),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        plot,
+        "green = translation in world (j-i); thin = camera +Z",
+        (12, height - 14),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        (80, 80, 80),
         1,
         cv2.LINE_AA,
     )
     cv2.putText(
         plot,
-        "red/blue dots = cam i/j; arrows = +Z; thick = delta",
-        (12, height - 12),
+        "units: metres",
+        (12, height - 34),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.42,
         (80, 80, 80),
@@ -159,24 +356,28 @@ def render_pair_pose_delta(
     tc = summary["translation_cam_i_m"]
     lines = [
         f"Pair {summary['frame_i']} -> {summary['frame_j']}",
+        f"World frame: {wf}",
         "",
-        f"Baseline (cam i frame): {summary['baseline_m']:.4f} m",
+        f"|Delta t| world: {dw_norm:.4f} m",
+        f"Delta t world (j-i): {fmt3(tw)}",
+        f"Delta t cam i (OpenCV): {fmt3(tc)}",
+        "",
+        f"Baseline ||t_cam||: {summary['baseline_m']:.4f} m",
         f"Rotation i->j: {summary['rotation_cam_i_to_cam_j_deg']:.2f} deg",
         "",
         f"Cam i world: {fmt3(summary['camera_i_position_world_m'])}",
         f"Cam j world: {fmt3(summary['camera_j_position_world_m'])}",
-        "",
-        f"Delta world (j-i): {fmt3(tw)}",
-        f"Delta cam i (OpenCV): {fmt3(tc)}",
     ]
+    if summary.get("motion_vs_optical_axis_deg") is not None:
+        lines.append(f"Angle(motion, cam i +Z): {summary['motion_vs_optical_axis_deg']:.2f} deg")
     y0 = 36
     for k, line in enumerate(lines):
         cv2.putText(
             text_panel,
             line,
-            (16, y0 + k * 34),
+            (16, y0 + k * 32),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.58,
+            0.55,
             (0, 0, 0),
             1,
             cv2.LINE_AA,

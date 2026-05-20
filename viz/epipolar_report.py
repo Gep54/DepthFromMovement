@@ -13,6 +13,11 @@ from viz.overlays import (
 )
 from viz.recorder import EPIPOLAR_STEP_ORDER
 
+# BGR colours for ``01_all_matches`` (epilines vs match chords vs keypoints).
+EPIPOLAR_ALL_EPI_LINE_COLOR = (0, 128, 255)  # orange
+EPIPOLAR_ALL_MATCH_LINE_COLOR = (255, 255, 0)  # cyan
+EPIPOLAR_ALL_POINT_COLOR = (0, 255, 0)  # green
+
 
 @dataclass(frozen=True)
 class EpipolarPairView:
@@ -43,22 +48,6 @@ def _label_banner(img: np.ndarray, text: str) -> np.ndarray:
     return out
 
 
-def _resize_panel(panel: np.ndarray, target_width: int) -> np.ndarray:
-    h, w = panel.shape[:2]
-    if w == target_width:
-        return panel
-    scale = target_width / float(w)
-    new_h = max(1, int(round(h * scale)))
-    return cv2.resize(panel, (target_width, new_h), interpolation=cv2.INTER_AREA)
-
-
-def _stack_panels_vertical(panels: list[np.ndarray], *, target_width: int = 1280) -> np.ndarray:
-    if not panels:
-        raise ValueError("need at least one panel")
-    resized = [_resize_panel(p, target_width) for p in panels]
-    return np.vstack(resized)
-
-
 def _page_all_matches(view: EpipolarPairView) -> np.ndarray:
     page = draw_matches_with_bilateral_epilines(
         view.und_i,
@@ -66,8 +55,11 @@ def _page_all_matches(view: EpipolarPairView) -> np.ndarray:
         view.pts1,
         view.pts2,
         view.F,
-        default_color=(0, 255, 255),
+        epiline_color=EPIPOLAR_ALL_EPI_LINE_COLOR,
+        match_line_color=EPIPOLAR_ALL_MATCH_LINE_COLOR,
+        point_color=EPIPOLAR_ALL_POINT_COLOR,
         line_thickness=1,
+        point_radius=3,
     )
     return _label_banner(page, f"frames {view.frame_i:03d}-{view.frame_j:03d}  all matches")
 
@@ -86,41 +78,35 @@ def _page_highlighted_matches(
     *,
     title: str,
 ) -> np.ndarray:
-    """One PNG: up to five correspondences stacked vertically, colour-coded."""
-    panels: list[np.ndarray] = []
-    for rank, (dist, mk) in enumerate(entries):
-        color = EPIPOLAR_HIGHLIGHT_COLORS[rank % len(EPIPOLAR_HIGHLIGHT_COLORS)]
-        panel = draw_matches_with_bilateral_epilines(
-            view.und_i,
-            view.und_j,
-            view.pts1,
-            view.pts2,
-            view.F,
-            match_indices=np.array([mk], dtype=np.int32),
-            colors=[color],
-            line_thickness=2,
-            point_radius=4,
-        )
-        panels.append(
-            _label_banner(
-                panel,
-                f"#{rank + 1}  dist={dist:.3f}px  frames {view.frame_i:03d}-{view.frame_j:03d}",
-            )
-        )
-    if not panels:
+    """One side-by-side image pair with up to five correspondences colour-coded."""
+    if not entries:
         empty = np.hstack([view.und_i, view.und_j])
         return _label_banner(empty, f"{title}  (no matches)")
-    body = _stack_panels_vertical(panels)
-    return _label_banner(body, title)
+
+    indices = np.array([mk for _, mk in entries], dtype=np.int32)
+    colors = [EPIPOLAR_HIGHLIGHT_COLORS[r % len(EPIPOLAR_HIGHLIGHT_COLORS)] for r in range(len(entries))]
+    panel = draw_matches_with_bilateral_epilines(
+        view.und_i,
+        view.und_j,
+        view.pts1,
+        view.pts2,
+        view.F,
+        match_indices=indices,
+        colors=colors,
+        line_thickness=2,
+        point_radius=4,
+    )
+    dist_bits = ", ".join(f"#{r + 1}={d:.2f}px" for r, (d, _) in enumerate(entries))
+    return _label_banner(panel, f"{title}  |  {dist_bits}")
 
 
 def export_epipolar_pair_pngs(pair_run_dir: str | Path, view: EpipolarPairView) -> Path:
     """
     Write per-pair epipolar figures under ``<pair_run_dir>/steps/epipolar/``:
 
-    - ``01_all_matches.png`` — every correspondence with epilines
-    - ``02_best_epipolar_5.png`` — five smallest symmetric epipolar distances (stacked)
-    - ``03_worst_epipolar_5.png`` — five largest distances (stacked)
+    - ``01_all_matches.png`` — every correspondence; orange epilines, cyan chords, green points
+    - ``02_best_epipolar_5.png`` — five best distances on one image pair
+    - ``03_worst_epipolar_5.png`` — five worst distances on one image pair
     """
     from viz.recorder import PipelineRecorder
 
@@ -137,7 +123,7 @@ def export_epipolar_pair_pngs(pair_run_dir: str | Path, view: EpipolarPairView) 
         _page_highlighted_matches(
             view,
             best,
-            title=f"best epipolar constraint (top {len(best)})  {view.frame_i:03d}-{view.frame_j:03d}",
+            title=f"best epipolar (top {len(best)})  {view.frame_i:03d}-{view.frame_j:03d}",
         ),
     )
     rec.write(
@@ -145,7 +131,7 @@ def export_epipolar_pair_pngs(pair_run_dir: str | Path, view: EpipolarPairView) 
         _page_highlighted_matches(
             view,
             worst,
-            title=f"worst epipolar constraint (bottom {len(worst)})  {view.frame_i:03d}-{view.frame_j:03d}",
+            title=f"worst epipolar (bottom {len(worst)})  {view.frame_i:03d}-{view.frame_j:03d}",
         ),
     )
     return rec.steps_dir

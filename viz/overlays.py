@@ -605,14 +605,18 @@ def draw_matches_with_bilateral_epilines(
     match_indices: np.ndarray | None = None,
     colors: Sequence[tuple[int, int, int]] | None = None,
     default_color: tuple[int, int, int] = (0, 255, 255),
+    epiline_color: tuple[int, int, int] | None = None,
+    match_line_color: tuple[int, int, int] | None = None,
+    point_color: tuple[int, int, int] | None = None,
     line_thickness: int = 1,
     point_radius: int = 3,
 ) -> np.ndarray:
     """
     Side-by-side mosaic with epilines on **both** images and match segments drawn.
 
-    When ``match_indices`` and ``colors`` are set, each listed match uses ``colors[r]``.
-  Otherwise every match uses ``default_color``.
+    When ``match_indices`` and ``colors`` are set, each listed match uses ``colors[r]`` for all
+    elements unless ``epiline_color`` / ``match_line_color`` / ``point_color`` override globally.
+    Otherwise every match uses ``default_color`` (or the global overrides).
     """
     p1 = np.asarray(pts1, dtype=np.float64).reshape(-1, 2)
     p2 = np.asarray(pts2, dtype=np.float64).reshape(-1, 2)
@@ -637,19 +641,22 @@ def draw_matches_with_bilateral_epilines(
 
     for rank, k in enumerate(idx):
         col = use_colors[rank % len(use_colors)]
+        epi_col = epiline_color if epiline_color is not None else col
         a, b, c = lines2_all[k]
-        _draw_epiline_on_image(right, float(a), float(b), float(c), col, line_thickness)
+        _draw_epiline_on_image(right, float(a), float(b), float(c), epi_col, line_thickness)
         a, b, c = lines1_all[k]
-        _draw_epiline_on_image(left, float(a), float(b), float(c), col, line_thickness)
+        _draw_epiline_on_image(left, float(a), float(b), float(c), epi_col, line_thickness)
 
     out, w1 = _match_canvas(left, right)
     for rank, k in enumerate(idx):
         col = use_colors[rank % len(use_colors)]
+        seg_col = match_line_color if match_line_color is not None else col
+        pt_col = point_color if point_color is not None else col
         pt1 = (int(p1[k, 0]), int(p1[k, 1]))
         pt2 = (int(p2[k, 0]) + w1, int(p2[k, 1]))
-        cv2.line(out, pt1, pt2, col, line_thickness, cv2.LINE_AA)
-        cv2.circle(out, pt1, point_radius, col, -1, cv2.LINE_AA)
-        cv2.circle(out, pt2, point_radius, col, -1, cv2.LINE_AA)
+        cv2.line(out, pt1, pt2, seg_col, line_thickness, cv2.LINE_AA)
+        cv2.circle(out, pt1, point_radius, pt_col, -1, cv2.LINE_AA)
+        cv2.circle(out, pt2, point_radius, pt_col, -1, cv2.LINE_AA)
     return out
 
 
