@@ -14,6 +14,23 @@ R_OPENCV_CAM_TO_BODY = np.array(
 )
 
 
+def body_T_opencv_cam() -> np.ndarray:
+    """Fixed ``body_T_cam`` (OpenCV optical -> body/FCU child); rotation only, zero translation."""
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R_OPENCV_CAM_TO_BODY
+    return T
+
+
+def world_T_body_to_world_T_opencv_cam(world_T_body: np.ndarray) -> np.ndarray:
+    """
+    Convert an odometry child (body/FCU) ``world_T_*`` pose to OpenCV optical ``world_T_camera``.
+
+    ``X_world = world_T_body @ body_T_opencv_cam @ X_cam``.
+    """
+    W = np.asarray(world_T_body, dtype=np.float64)
+    return W @ body_T_opencv_cam()
+
+
 def rotate_opencv_cam_to_body(x: np.ndarray) -> np.ndarray:
     """Map a 3-vector from OpenCV camera axes to body/FCU axes."""
     v = np.asarray(x, dtype=np.float64).reshape(3)

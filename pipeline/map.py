@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from pipeline.config import FeatureConfig
+from pipeline.frame_axes import world_T_body_to_world_T_opencv_cam
 from pipeline.geometry import (
     epipolar_inlier_mask_from_motion,
     essential_from_R_t,
@@ -33,7 +34,8 @@ class MapConfig:
     ``triangulation_motion_source``:
 
     - ``vision_scale``: RANSAC essential + vision rotation; translation norm from odometry.
-    - ``odometry_pose``: relative ``R,t`` from ``world_T_camera``; epipolar gate vs motion ``E``.
+    - ``odometry_pose``: relative ``R,t`` from ``world_T_camera`` (body/FCU poses rotated to
+      OpenCV optical via ``frame_axes``); epipolar gate vs motion ``E``.
 
     ``ransac_epipolar_thresh``: RANSAC threshold (px) in ``vision_scale``; symmetric epipolar
     distance threshold (px) in ``odometry_pose``.
@@ -220,7 +222,10 @@ class IncrementalMap:
         Wi: np.ndarray,
         Wj: np.ndarray,
     ) -> TwoViewResult:
-        R_motion, t_motion = relative_motion_from_world_poses(Wi, Wj)
+        # Stored poses are body/FCU (odometry child); triangulation uses OpenCV optical axes.
+        Wi_ocv = world_T_body_to_world_T_opencv_cam(Wi)
+        Wj_ocv = world_T_body_to_world_T_opencv_cam(Wj)
+        R_motion, t_motion = relative_motion_from_world_poses(Wi_ocv, Wj_ocv)
         E_motion, mask = epipolar_inlier_mask_from_motion(
             pts1,
             pts2,
@@ -259,7 +264,7 @@ class IncrementalMap:
             )
 
         if pts1_i.shape[0] == 0:
-            return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
+            return _failure_result(essential_from_world_poses(Wi_ocv, Wj_ocv, self.K))
 
         R_est = R_motion
         t_est = t_motion
@@ -284,8 +289,8 @@ class IncrementalMap:
             pts1_i,
             pts2_i,
             desc_inlier,
-            Wi,
-            Wj,
+            Wi_ocv,
+            Wj_ocv,
         )
 
     def _finish_two_view(

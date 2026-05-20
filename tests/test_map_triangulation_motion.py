@@ -10,6 +10,7 @@ import pytest
 
 from data.dataset import load_dataset
 from pipeline import map as map_mod
+from pipeline.frame_axes import world_T_body_to_world_T_opencv_cam
 from pipeline.geometry import relative_motion_from_world_poses
 from pipeline.map import IncrementalMap, MapConfig
 
@@ -47,7 +48,10 @@ def test_odometry_pose_uses_motion_R_t(
     W = ds.world_T_camera
     g0 = cv2.imread(str(ds.image_paths[0]), cv2.IMREAD_GRAYSCALE)
     g1 = cv2.imread(str(ds.image_paths[1]), cv2.IMREAD_GRAYSCALE)
-    R_exp, t_exp = relative_motion_from_world_poses(W[0], W[1])
+    R_exp, t_exp = relative_motion_from_world_poses(
+        world_T_body_to_world_T_opencv_cam(W[0]),
+        world_T_body_to_world_T_opencv_cam(W[1]),
+    )
     tw = IncrementalMap(
         cfg=MapConfig(triangulation_motion_source="odometry_pose"),
         feat_cfg=ds.feature_config,

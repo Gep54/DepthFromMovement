@@ -6,7 +6,9 @@ from pipeline.frame_axes import (
     R_OPENCV_CAM_TO_BODY,
     opencv_cam_point_to_cam0,
     rotate_opencv_cam_to_body,
+    world_T_body_to_world_T_opencv_cam,
 )
+from pipeline.geometry import relative_motion_from_world_poses
 
 
 def test_opencv_cam_to_body_rotation_axes() -> None:
@@ -24,3 +26,15 @@ def test_opencv_cam_point_to_cam0_identity_poses() -> None:
         [2.0, 0.0, 0.0],
         atol=1e-12,
     )
+
+
+def test_world_T_body_to_opencv_changes_relative_translation() -> None:
+    W0 = np.eye(4, dtype=np.float64)
+    W1 = np.eye(4, dtype=np.float64)
+    W1[:3, 3] = [1.0, 0.0, 0.0]
+    _, t_body = relative_motion_from_world_poses(W0, W1)
+    _, t_ocv = relative_motion_from_world_poses(
+        world_T_body_to_world_T_opencv_cam(W0),
+        world_T_body_to_world_T_opencv_cam(W1),
+    )
+    assert not np.allclose(t_body.ravel(), t_ocv.ravel(), atol=1e-9)
