@@ -23,6 +23,8 @@ KNOWN_PARAMETERS = frozenset(
         "odom_main_topic",
         "subscribe_odom_gt",
         "odom_gt_topic",
+        "publish_sparse_map_true",
+        "sparse_map_true_topic",
         "keyframe_distance_m",
         "keyframe_buffer_start_fraction",
         "output_root",
