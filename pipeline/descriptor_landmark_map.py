@@ -134,12 +134,12 @@ class DescriptorLandmarkMap:
         self,
         tw: TwoViewResult,
         world_T_camera_0: np.ndarray,
-        world_T_camera_j: np.ndarray,
+        world_T_camera_i: np.ndarray,
         *,
         max_range_cam0: float | None = None,
         spatial_merge_radius_m: float | None = None,
     ) -> None:
-        """Ingest triangulated points from ``tw``; map current frame j (OpenCV) -> cam0 before fusion."""
+        """Ingest triangulated points; step-one on cam-i Z, then map to cam0 (poses unchanged)."""
         if tw.descriptors is None or tw.descriptors.shape[0] == 0:
             return
         n = tw.X_world_h.shape[1]
@@ -148,7 +148,7 @@ class DescriptorLandmarkMap:
                 f"descriptors rows ({tw.descriptors.shape[0]}) != X columns ({n})"
             )
         W0 = np.asarray(world_T_camera_0, dtype=np.float64)
-        Wj = np.asarray(world_T_camera_j, dtype=np.float64)
+        Wi = np.asarray(world_T_camera_i, dtype=np.float64)
         radius = (
             spatial_merge_radius_m
             if spatial_merge_radius_m is not None
@@ -158,10 +158,10 @@ class DescriptorLandmarkMap:
         for k in range(n):
             if not tw.cheiral_mask[k]:
                 continue
-            Xw = tw.X_world_h[:3, k]
-            if not np.all(np.isfinite(Xw)):
+            X_ci = tw.X_cam1_h[:3, k]
+            if not np.all(np.isfinite(X_ci)):
                 continue
-            X_cam0 = opencv_cam_point_to_cam0(Xw, W0, Wj)
+            X_cam0 = opencv_cam_point_to_cam0(X_ci, W0, Wi)
             if max_range_cam0 is not None and float(np.linalg.norm(X_cam0)) > max_range_cam0:
                 continue
             d_obs = tw.descriptors[k]

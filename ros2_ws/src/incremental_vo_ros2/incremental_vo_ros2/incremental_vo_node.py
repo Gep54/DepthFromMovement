@@ -826,7 +826,7 @@ class IncrementalVoNode(Node):
                             self._desc_map.integrate(
                                 tw,
                                 self._world_T_camera[0],
-                                self._world_T_camera[tw.frame_j],
+                                self._world_T_camera[tw.frame_i],
                                 max_range_cam0=max_range_cam0,
                                 spatial_merge_radius_m=self._d,
                             )
@@ -905,7 +905,7 @@ class IncrementalVoNode(Node):
                             self._desc_map_true.integrate(
                                 tw,
                                 self._world_T_camera_true[0],
-                                self._world_T_camera_true[tw.frame_j],
+                                self._world_T_camera_true[tw.frame_i],
                                 max_range_cam0=max_range_cam0,
                                 spatial_merge_radius_m=self._d,
                             )

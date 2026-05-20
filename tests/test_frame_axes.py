@@ -6,6 +6,7 @@ from pipeline.frame_axes import (
     R_OPENCV_CAM_TO_BODY,
     opencv_cam_point_to_cam0,
     rotate_opencv_cam_to_body,
+    step_one_opencv_cam_depth_axis,
     world_T_body_to_world_T_opencv_cam,
 )
 from pipeline.geometry import relative_motion_from_world_poses
@@ -17,6 +18,17 @@ def test_opencv_cam_to_body_rotation_axes() -> None:
     np.testing.assert_allclose(rotate_opencv_cam_to_body(ex), [0.0, -1.0, 0.0], atol=1e-12)
     np.testing.assert_allclose(rotate_opencv_cam_to_body(ey), [0.0, 0.0, -1.0], atol=1e-12)
     np.testing.assert_allclose(R_OPENCV_CAM_TO_BODY @ ez, [1.0, 0.0, 0.0], atol=1e-12)
+
+
+def test_step_one_only_remaps_depth_not_lateral() -> None:
+    np.testing.assert_allclose(
+        step_one_opencv_cam_depth_axis(np.array([1.0, 2.0, 3.0])),
+        [3.0, 1.0, 2.0],
+        atol=1e-12,
+    )
+    full = rotate_opencv_cam_to_body(np.array([1.0, 2.0, 3.0]))
+    partial = step_one_opencv_cam_depth_axis(np.array([1.0, 2.0, 3.0]))
+    assert not np.allclose(full, partial)
 
 
 def test_opencv_cam_point_to_cam0_identity_poses() -> None:

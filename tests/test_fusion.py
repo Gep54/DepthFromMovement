@@ -26,6 +26,7 @@ def _tw(
         t_est=None,
         scale=1.0,
         scale_ok=True,
+        X_cam1_h=X_world_h,
         X_world_h=X_world_h,
         cheiral_mask=cheiral,
         reproj={},

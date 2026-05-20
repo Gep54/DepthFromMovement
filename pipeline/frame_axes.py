@@ -37,21 +37,30 @@ def rotate_opencv_cam_to_body(x: np.ndarray) -> np.ndarray:
     return (R_OPENCV_CAM_TO_BODY @ v).astype(np.float64)
 
 
+def step_one_opencv_cam_depth_axis(x: np.ndarray) -> np.ndarray:
+    """
+    Apply only the forward-depth part of OpenCV→body (step one): cam **Z** → storage **X**.
+
+    Image-plane ``x,y`` stay in OpenCV lateral coordinates; this is not a full ``R @ X``.
+    """
+    v = np.asarray(x, dtype=np.float64).reshape(3)
+    forward = float((R_OPENCV_CAM_TO_BODY @ v)[0])
+    return np.array([forward, v[0], v[1]], dtype=np.float64)
+
+
 def opencv_cam_point_to_cam0(
-    X_w: np.ndarray,
+    X_opencv_cam_i: np.ndarray,
     world_T_camera_0: np.ndarray,
-    world_T_camera_j: np.ndarray,
+    world_T_camera_i: np.ndarray,
 ) -> np.ndarray:
     """
-    Map a world point into camera-0 storage coordinates.
+    Map a triangulated point in OpenCV camera-``i`` into camera-0 storage coordinates.
 
-    Pipeline: world -> OpenCV cam-j -> body axes -> cam-0 (body-aligned at keyframe 0).
-    ``world_T_camera_*`` are camera/body->world poses (same convention as ``motion.json``).
+    Step one (depth axis only) runs on the camera-frame point; ``world_T_camera_0`` is not
+    modified—only ``T_c0_ci = inv(W0) @ Wi`` maps the adjusted point into keyframe-0.
     """
-    Xw = np.asarray(X_w, dtype=np.float64).reshape(3)
+    X_adj = step_one_opencv_cam_depth_axis(X_opencv_cam_i)
     W0 = np.asarray(world_T_camera_0, dtype=np.float64)
-    Wj = np.asarray(world_T_camera_j, dtype=np.float64)
-    X_cj = (invert_se3(Wj) @ np.array([Xw[0], Xw[1], Xw[2], 1.0], dtype=np.float64))[:3]
-    X_cj_body = rotate_opencv_cam_to_body(X_cj)
-    T_c0_cj = invert_se3(W0) @ Wj
-    return (T_c0_cj @ np.array([X_cj_body[0], X_cj_body[1], X_cj_body[2], 1.0], dtype=np.float64))[:3]
+    Wi = np.asarray(world_T_camera_i, dtype=np.float64)
+    T_c0_ci = invert_se3(W0) @ Wi
+    return (T_c0_ci @ np.array([X_adj[0], X_adj[1], X_adj[2], 1.0], dtype=np.float64))[:3]
