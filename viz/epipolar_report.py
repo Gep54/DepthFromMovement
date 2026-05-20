@@ -11,7 +11,7 @@ from viz.overlays import (
     draw_matches_with_bilateral_epilines,
     symmetric_epipolar_distances,
 )
-from viz.pdf_util import write_bgr_pdf
+from viz.recorder import EPIPOLAR_STEP_ORDER
 
 
 @dataclass(frozen=True)
@@ -72,16 +72,23 @@ def _page_all_matches(view: EpipolarPairView) -> np.ndarray:
     return _label_banner(page, f"frames {view.frame_i:03d}-{view.frame_j:03d}  all matches")
 
 
+def _ranked_correspondences(view: EpipolarPairView) -> list[tuple[float, int]]:
+    """Sorted ``(symmetric epipolar distance px, match index)`` ascending (best first)."""
+    dists = symmetric_epipolar_distances(view.pts1, view.pts2, view.F)
+    ranked = [(float(d), int(mk)) for mk, d in enumerate(dists)]
+    ranked.sort(key=lambda t: t[0])
+    return ranked
+
+
 def _page_highlighted_matches(
-    entries: list[tuple[float, int, int]],
-    views: list[EpipolarPairView],
+    view: EpipolarPairView,
+    entries: list[tuple[float, int]],
     *,
     title: str,
 ) -> np.ndarray:
-    """One PDF page: up to five correspondences, colour-coded."""
+    """One PNG: up to five correspondences stacked vertically, colour-coded."""
     panels: list[np.ndarray] = []
-    for rank, (dist, vi, mk) in enumerate(entries):
-        view = views[vi]
+    for rank, (dist, mk) in enumerate(entries):
         color = EPIPOLAR_HIGHLIGHT_COLORS[rank % len(EPIPOLAR_HIGHLIGHT_COLORS)]
         panel = draw_matches_with_bilateral_epilines(
             view.und_i,
@@ -100,48 +107,57 @@ def _page_highlighted_matches(
                 f"#{rank + 1}  dist={dist:.3f}px  frames {view.frame_i:03d}-{view.frame_j:03d}",
             )
         )
+    if not panels:
+        empty = np.hstack([view.und_i, view.und_j])
+        return _label_banner(empty, f"{title}  (no matches)")
     body = _stack_panels_vertical(panels)
     return _label_banner(body, title)
 
 
-def _ranked_correspondences(views: list[EpipolarPairView]) -> list[tuple[float, int, int]]:
-    ranked: list[tuple[float, int, int]] = []
-    for vi, view in enumerate(views):
-        dists = symmetric_epipolar_distances(view.pts1, view.pts2, view.F)
-        for mk, d in enumerate(dists):
-            ranked.append((float(d), vi, int(mk)))
-    ranked.sort(key=lambda t: t[0])
-    return ranked
-
-
-def export_epipolar_pdf_bundle(run_dir: str | Path, views: list[EpipolarPairView]) -> Path:
+def export_epipolar_pair_pngs(pair_run_dir: str | Path, view: EpipolarPairView) -> Path:
     """
-    Write ``<run_dir>/epipolar/`` with three PDFs:
+    Write per-pair epipolar figures under ``<pair_run_dir>/steps/epipolar/``:
 
-    - ``all_pairs_epilines.pdf`` — every correspondence with epilines on both images
-    - ``worst_epipolar_5.pdf`` — five largest symmetric epipolar distances (colour-coded)
-    - ``best_epipolar_5.pdf`` — five smallest distances (colour-coded)
+    - ``01_all_matches.png`` — every correspondence with epilines
+    - ``02_best_epipolar_5.png`` — five smallest symmetric epipolar distances (stacked)
+    - ``03_worst_epipolar_5.png`` — five largest distances (stacked)
     """
-    if not views:
-        raise ValueError("export_epipolar_pdf_bundle requires at least one frame pair view")
+    from viz.recorder import PipelineRecorder
 
-    out_dir = Path(run_dir) / "epipolar"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    rec = PipelineRecorder(pair_run_dir, subdir="epipolar", slug_order=EPIPOLAR_STEP_ORDER)
+    rec.write("all_matches", _page_all_matches(view))
 
-    pages_all = [_page_all_matches(v) for v in views]
-    write_bgr_pdf(out_dir / "all_pairs_epilines.pdf", pages_all)
-
-    ranked = _ranked_correspondences(views)
+    ranked = _ranked_correspondences(view)
     n_pick = min(5, len(ranked))
     best = ranked[:n_pick]
     worst = list(reversed(ranked[-n_pick:])) if n_pick else []
 
-    write_bgr_pdf(
-        out_dir / "worst_epipolar_5.pdf",
-        [_page_highlighted_matches(worst, views, title="worst epipolar constraint (5 pairs)")],
+    rec.write(
+        "best_epipolar_5",
+        _page_highlighted_matches(
+            view,
+            best,
+            title=f"best epipolar constraint (top {len(best)})  {view.frame_i:03d}-{view.frame_j:03d}",
+        ),
     )
-    write_bgr_pdf(
-        out_dir / "best_epipolar_5.pdf",
-        [_page_highlighted_matches(best, views, title="best epipolar constraint (5 pairs)")],
+    rec.write(
+        "worst_epipolar_5",
+        _page_highlighted_matches(
+            view,
+            worst,
+            title=f"worst epipolar constraint (bottom {len(worst)})  {view.frame_i:03d}-{view.frame_j:03d}",
+        ),
     )
+    return rec.steps_dir
+
+
+def export_epipolar_pdf_bundle(run_dir: str | Path, views: list[EpipolarPairView]) -> Path:
+    """Deprecated: use :func:`export_epipolar_pair_pngs` per pair. Writes PNGs under ``epipolar/``."""
+    if not views:
+        raise ValueError("export_epipolar_pdf_bundle requires at least one frame pair view")
+    out_dir = Path(run_dir) / "epipolar"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for view in views:
+        pair_sub = out_dir / f"{view.frame_i:03d}_{view.frame_j:03d}"
+        export_epipolar_pair_pngs(pair_sub, view)
     return out_dir

@@ -12,18 +12,29 @@ from pipeline.geometry import invert_se3
 from pipeline.map import TwoViewResult
 
 
-def world_point_to_cam0(X_w: np.ndarray, world_T_camera_0: np.ndarray) -> np.ndarray:
-    """Map a 3D world point into camera-0 coordinates (``T_c0_w = invert(world_T_camera_0)``)."""
-    T_c0_w = invert_se3(np.asarray(world_T_camera_0, dtype=np.float64))
-    Xh = np.array([X_w[0], X_w[1], X_w[2], 1.0], dtype=np.float64)
-    return (T_c0_w @ Xh)[:3].astype(np.float64)
-
-
 def within_merge_sphere(p: np.ndarray, q: np.ndarray, radius_m: float) -> bool:
-    """True if ``p`` and ``q`` lie within a sphere of radius ``radius_m`` (cam0 frame)."""
+    """True if ``p`` and ``q`` lie within a sphere of radius ``radius_m`` (world frame)."""
     return float(np.linalg.norm(np.asarray(p, dtype=np.float64) - np.asarray(q, dtype=np.float64))) <= float(
         radius_m
     )
+
+
+def project_world_to_camera_uv_z(
+    K: np.ndarray, X_world: np.ndarray, world_T_camera: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project world-frame points into ``world_T_camera`` (pixels and camera Z)."""
+    X = np.asarray(X_world, dtype=np.float64).reshape(-1, 3)
+    if X.shape[0] == 0:
+        return np.zeros((0, 2), np.float64), np.zeros(0, np.float64)
+    Tcw = invert_se3(np.asarray(world_T_camera, dtype=np.float64))
+    R = Tcw[:3, :3]
+    t = Tcw[:3, 3].reshape(3, 1)
+    Xc = (R @ X.T + t).T
+    z = Xc[:, 2]
+    uv = np.zeros((X.shape[0], 2), dtype=np.float64)
+    uv[:, 0] = K[0, 0] * (Xc[:, 0] / np.maximum(z, 1e-9)) + K[0, 2]
+    uv[:, 1] = K[1, 1] * (Xc[:, 1] / np.maximum(z, 1e-9)) + K[1, 2]
+    return uv, z
 
 
 def descriptor_distance(a: np.ndarray, b: np.ndarray, method: Literal["ORB", "SIFT"]) -> float:
@@ -46,7 +57,7 @@ class DescriptorMapConfig:
     ratio_second_best: float | None = None
     """If set, require ``best < ratio * second`` (Lowe-style)."""
     spatial_merge_radius_m: float | None = None
-    """If set, descriptor matches merge only when 3D distance in cam0 <= this value."""
+    """If set, descriptor matches merge only when 3D distance in world <= this value."""
 
     @staticmethod
     def defaults(method: Literal["ORB", "SIFT"]) -> DescriptorMapConfig:
@@ -58,34 +69,35 @@ class DescriptorMapConfig:
 @dataclass
 class DescriptorLandmark:
     id: int
-    position_cam0: np.ndarray
-    """(3,) float64 in first-camera frame."""
+    position_world: np.ndarray
+    """(3,) float64 in metric world frame (e.g. ``gps_baro_origin``)."""
     n_updates: int
     descriptor: np.ndarray
     best_merge_distance: float = field(default_factory=lambda: float("inf"))
 
 
 class DescriptorLandmarkMap:
-    """Sparse map in camera-0 frame with descriptor NN association."""
+    """Sparse map in metric world frame with descriptor NN association."""
 
     def __init__(self, cfg: DescriptorMapConfig) -> None:
         self.cfg = cfg
         self.landmarks: list[DescriptorLandmark] = []
         self._next_id = 0
 
-    def positions_cam0(self) -> np.ndarray:
+    def positions_world(self) -> np.ndarray:
         if not self.landmarks:
             return np.zeros((0, 3), dtype=np.float64)
-        return np.stack([lm.position_cam0 for lm in self.landmarks], axis=0)
+        return np.stack([lm.position_world for lm in self.landmarks], axis=0)
 
-    def prune_beyond_range_cam0(self, max_range_m: float) -> int:
-        """Drop landmarks with ``||position_cam0|| > max_range_m``; return count removed."""
+    def prune_beyond_range_world(self, max_range_m: float, anchor_world: np.ndarray) -> int:
+        """Drop landmarks with ``||position_world - anchor|| > max_range_m``; return count removed."""
         if max_range_m <= 0.0 or not self.landmarks:
             return 0
+        anchor = np.asarray(anchor_world, dtype=np.float64).reshape(3)
         kept: list[DescriptorLandmark] = []
         removed = 0
         for lm in self.landmarks:
-            if float(np.linalg.norm(lm.position_cam0)) > max_range_m:
+            if float(np.linalg.norm(lm.position_world - anchor)) > max_range_m:
                 removed += 1
             else:
                 kept.append(lm)
@@ -115,14 +127,14 @@ class DescriptorLandmarkMap:
             return float(np.clip(b, 1e-6, 1.0))
         return 1.0 / float(lm.n_updates + 1)
 
-    def _append_landmark(self, X_cam0: np.ndarray, d_obs: np.ndarray) -> None:
+    def _append_landmark(self, X_world: np.ndarray, d_obs: np.ndarray) -> None:
         lid = self._next_id
         self._next_id += 1
         desc_copy = np.array(d_obs, copy=True, dtype=d_obs.dtype)
         self.landmarks.append(
             DescriptorLandmark(
                 id=lid,
-                position_cam0=X_cam0.copy(),
+                position_world=np.asarray(X_world, dtype=np.float64).reshape(3).copy(),
                 n_updates=1,
                 descriptor=desc_copy,
                 best_merge_distance=float("inf"),
@@ -132,12 +144,12 @@ class DescriptorLandmarkMap:
     def integrate(
         self,
         tw: TwoViewResult,
-        world_T_camera_0: np.ndarray,
         *,
-        max_range_cam0: float | None = None,
+        anchor_position_world: np.ndarray | None = None,
+        max_range_world: float | None = None,
         spatial_merge_radius_m: float | None = None,
     ) -> None:
-        """Ingest triangulated points from ``tw``; transform to cam0 before fusion."""
+        """Ingest triangulated world points from ``tw`` (``X_world_h`` already in metric world)."""
         if tw.descriptors is None or tw.descriptors.shape[0] == 0:
             return
         n = tw.X_world_h.shape[1]
@@ -145,7 +157,11 @@ class DescriptorLandmarkMap:
             raise ValueError(
                 f"descriptors rows ({tw.descriptors.shape[0]}) != X columns ({n})"
             )
-        W0 = np.asarray(world_T_camera_0, dtype=np.float64)
+        anchor = (
+            np.asarray(anchor_position_world, dtype=np.float64).reshape(3)
+            if anchor_position_world is not None
+            else None
+        )
         radius = (
             spatial_merge_radius_m
             if spatial_merge_radius_m is not None
@@ -158,9 +174,9 @@ class DescriptorLandmarkMap:
             Xw = tw.X_world_h[:3, k]
             if not np.all(np.isfinite(Xw)):
                 continue
-            X_cam0 = world_point_to_cam0(Xw, W0)
-            if max_range_cam0 is not None and float(np.linalg.norm(X_cam0)) > max_range_cam0:
-                continue
+            if anchor is not None and max_range_world is not None:
+                if float(np.linalg.norm(Xw - anchor)) > max_range_world:
+                    continue
             d_obs = tw.descriptors[k]
 
             best_i, best_d, second_d = self._nearest_landmark(d_obs)
@@ -179,16 +195,16 @@ class DescriptorLandmarkMap:
                 or best_d > self.cfg.max_match_distance
                 or reject_ratio
             ):
-                self._append_landmark(X_cam0, d_obs)
+                self._append_landmark(Xw, d_obs)
                 continue
 
             lm = self.landmarks[best_i]
-            if radius is not None and radius > 0 and not within_merge_sphere(X_cam0, lm.position_cam0, radius):
-                self._append_landmark(X_cam0, d_obs)
+            if radius is not None and radius > 0 and not within_merge_sphere(Xw, lm.position_world, radius):
+                self._append_landmark(Xw, d_obs)
                 continue
 
             beta = self._merge_beta_eff(lm)
-            lm.position_cam0 = (1.0 - beta) * lm.position_cam0 + beta * X_cam0
+            lm.position_world = (1.0 - beta) * lm.position_world + beta * Xw
             lm.n_updates += 1
 
             d_match = descriptor_distance(d_obs, lm.descriptor, self.cfg.method)
@@ -198,20 +214,20 @@ class DescriptorLandmarkMap:
 
 
 def export_landmarks_csv(path: str | Path, desc_map: DescriptorLandmarkMap) -> None:
-    """Write ``id,x_cam0,y_cam0,z_cam0,n_updates,descriptor_hex``."""
+    """Write ``id,x_world,y_world,z_world,n_updates,descriptor_hex``."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["id", "x_cam0", "y_cam0", "z_cam0", "n_updates", "descriptor_hex"])
+        w.writerow(["id", "x_world", "y_world", "z_world", "n_updates", "descriptor_hex"])
         for lm in desc_map.landmarks:
             raw = np.asarray(lm.descriptor).tobytes()
             w.writerow(
                 [
                     lm.id,
-                    f"{lm.position_cam0[0]:.12g}",
-                    f"{lm.position_cam0[1]:.12g}",
-                    f"{lm.position_cam0[2]:.12g}",
+                    f"{lm.position_world[0]:.12g}",
+                    f"{lm.position_world[1]:.12g}",
+                    f"{lm.position_world[2]:.12g}",
                     lm.n_updates,
                     raw.hex(),
                 ]

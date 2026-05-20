@@ -28,6 +28,12 @@ GEOMETRY_STEP_ORDER: tuple[str, ...] = (
     "depth_error",
 )
 
+EPIPOLAR_STEP_ORDER: tuple[str, ...] = (
+    "all_matches",
+    "best_epipolar_5",
+    "worst_epipolar_5",
+)
+
 # Default ``dfm-export-steps`` output (minimal per pair).
 MINIMAL_PAIR_STEP_ORDER: tuple[str, ...] = (
     "matches",
@@ -49,6 +55,7 @@ _SUBDIR_ORDERS: dict[str, tuple[str, ...]] = {
     "single": SINGLE_STEP_ORDER,
     "pair": PAIR_STEP_ORDER,
     "geometry": GEOMETRY_STEP_ORDER,
+    "epipolar": EPIPOLAR_STEP_ORDER,
 }
 
 

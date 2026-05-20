@@ -18,7 +18,7 @@ from pipeline.descriptor_landmark_map import (
     DescriptorLandmarkMap,
     DescriptorMapConfig,
     export_landmarks_csv,
-    world_point_to_cam0,
+    project_world_to_camera_uv_z,
 )
 from pipeline.fusion import FusedLandmarkMap, FusedLandmark, fused_world_points_homogeneous
 from pipeline.metric_fusion import (
@@ -54,7 +54,7 @@ __all__ = [
     "DescriptorLandmarkMap",
     "DescriptorMapConfig",
     "export_landmarks_csv",
-    "world_point_to_cam0",
+    "project_world_to_camera_uv_z",
     "fused_world_points_homogeneous",
     "create_metric_pose_fusion",
     "fuse_pose_sequence",

@@ -16,7 +16,7 @@ from viz.match_classification import (
     audit_record,
     classify_match_rejections,
 )
-from viz.epipolar_report import EpipolarPairView, export_epipolar_pdf_bundle
+from viz.epipolar_report import EpipolarPairView, export_epipolar_pair_pngs
 from viz.overlays import (
     MATCH_COLOR_CHEIRAL,
     MATCH_COLOR_EPIPOLAR,
@@ -316,12 +316,21 @@ def export_single_pair_stages(
         )
 
     if export_epipolar:
-        export_epipolar_pdf_bundle(
+        export_epipolar_pair_pngs(
             pair_root,
-            [epipolar_pair_view(i=i, j=j, und_i=und_i, und_j=und_j, tw=tw, K=K, world_T_camera=ds.world_T_camera)],
+            epipolar_pair_view(
+                i=i, j=j, und_i=und_i, und_j=und_j, tw=tw, K=K, world_T_camera=ds.world_T_camera
+            ),
         )
 
-    export_pair_pose_delta(pair_root, Wi, Wj, frame_i=i, frame_j=j)
+    export_pair_pose_delta(
+        pair_root,
+        ds.world_T_camera[i],
+        ds.world_T_camera[j],
+        frame_i=i,
+        frame_j=j,
+        world_frame=ds.world_frame,
+    )
 
     return record
 
@@ -387,7 +396,7 @@ def export_sequence_consecutive_pairs(
           pairs/
             iii_jjj/pose_delta.png, pose_delta.json, steps/...
           rejection_audit.jsonl
-          epipolar/   (optional, ``--epipolar``)
+          pairs/iii_jjj/steps/epipolar/  (optional, ``--epipolar``)
     """
     root = Path(run_dir)
     pairs_root = root / "pairs"
@@ -424,7 +433,6 @@ def export_sequence_consecutive_pairs(
     _log_progress(
         f"dfm-export-steps: {n} frames, {n_pairs} pairs (lookback={wl}) -> {root.resolve()}"
     )
-    epipolar_views: list[EpipolarPairView] = []
     for pair_idx, (i, j) in enumerate(pairs, start=1):
         _log_progress(f"dfm-export-steps: pair {i}-{j} ({pair_idx}/{n_pairs}) …")
         tw = inc.add_frame_pair(
@@ -438,20 +446,6 @@ def export_sequence_consecutive_pairs(
         pair_dir = pairs_root / f"{i:03d}_{j:03d}"
         bgr_i = read_image_bgr(ds.image_paths[i])
         bgr_j = read_image_bgr(ds.image_paths[j])
-        und_i, _ = _undistort_if_needed(bgr_i, ds)
-        und_j, _ = _undistort_if_needed(bgr_j, ds)
-        if export_epipolar:
-            epipolar_views.append(
-                epipolar_pair_view(
-                    i=i,
-                    j=j,
-                    und_i=und_i,
-                    und_j=und_j,
-                    tw=tw,
-                    K=ds.calibration.K,
-                    world_T_camera=ds.world_T_camera,
-                )
-            )
         export_single_pair_stages(
             ds,
             pair_dir,
@@ -465,16 +459,12 @@ def export_sequence_consecutive_pairs(
             map_cfg=cfg,
             full_steps=full_steps,
             detail_log=detail_log,
-            export_epipolar=False,
+            export_epipolar=export_epipolar,
         )
         n_tri = int(tw.X_world_h.shape[1]) if tw.X_world_h.size else 0
         _log_progress(f"dfm-export-steps: pair {i}-{j} done ({n_tri} triangulated cols)")
 
     _log_progress(f"dfm-export-steps: finished {n_pairs} pairs")
-
-    if export_epipolar and epipolar_views:
-        _log_progress(f"dfm-export-steps: writing epipolar PDFs ({len(epipolar_views)} pages) …")
-        export_epipolar_pdf_bundle(root, epipolar_views)
 
     _log_progress("dfm-export-steps: done")
     return pairs

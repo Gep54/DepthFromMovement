@@ -21,7 +21,6 @@ from data.schema import (
     validate_dataset_consistency,
     validate_motion_vs_images,
 )
-from pipeline.geometry import canonicalize_world_T_camera_to_first, invert_se3
 
 
 @dataclass
@@ -31,11 +30,13 @@ class Dataset:
     calibration: Calibration
     motion: MotionSpec
     world_T_camera: list[np.ndarray]
-    """Per-frame camera-to-world poses; after ``load_dataset`` the trajectory is camera-0-centric (first pose is identity)."""
+    """Per-frame ``world_T_camera`` in the metric world frame (e.g. ``gps_baro_origin`` from ``motion.json``)."""
+    world_frame: str | None = None
+    """World / odometry parent frame label from ``motion.json`` when available."""
     gt_depth_paths: list[Path | None] = field(default_factory=list)
     """Aligned with image_paths; None if missing."""
     gt_world_T_camera: list[np.ndarray] | None = None
-    """Optional ground-truth poses; when present, transformed with the same left-multiplier as ``world_T_camera``."""
+    """Optional ground-truth poses in the same absolute world as ``world_T_camera`` when provided."""
     feature_config: FeatureConfig = field(default_factory=FeatureConfig)
     """Feature detector + matcher settings (from optional ``features.json``)."""
 
@@ -157,11 +158,8 @@ def load_dataset(
                 f"gt_poses.txt has {len(gt_poses)} rows but found {len(image_paths)} images; counts must match"
             )
 
-    W_first = np.asarray(world_T_camera[0], dtype=np.float64).copy()
-    world_T_camera = canonicalize_world_T_camera_to_first(world_T_camera)
-    if gt_poses is not None:
-        L = invert_se3(W_first)
-        gt_poses = [L @ np.asarray(G, dtype=np.float64) for G in gt_poses]
+    world_frame = motion.target_world_frame or motion.world_frame
+    world_T_camera = [np.asarray(W, dtype=np.float64).copy() for W in world_T_camera]
 
     return Dataset(
         paths=p,
@@ -169,6 +167,7 @@ def load_dataset(
         calibration=calibration,
         motion=motion,
         world_T_camera=world_T_camera,
+        world_frame=world_frame,
         gt_depth_paths=gt_depth_paths,
         gt_world_T_camera=gt_poses,
         feature_config=feature_config,

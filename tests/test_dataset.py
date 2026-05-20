@@ -50,5 +50,6 @@ def test_dataset_provided_motion_fusion_position_blend(mini_dataset_dir: Path) -
         json.dump({"method": "position_blend", "position_blend_weight": 0.5}, f)
 
     ds = load_dataset(mini_dataset_dir)
-    np.testing.assert_allclose(ds.world_T_camera[0][:3, 3], [0.0, 0.0, 0.0], atol=1e-9)
-    np.testing.assert_allclose(ds.world_T_camera[1][:3, 3], [0.15, 0.0, 0.0], atol=1e-9)
+    # Poses stay in metric world (no camera-0 canonicalization).
+    np.testing.assert_allclose(ds.world_T_camera[0][:3, 3], [5.0, 0.0, 0.0], atol=1e-9)
+    np.testing.assert_allclose(ds.world_T_camera[1][:3, 3], [5.15, 0.0, 0.0], atol=1e-9)

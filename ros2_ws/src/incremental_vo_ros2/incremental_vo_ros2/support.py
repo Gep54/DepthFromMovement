@@ -363,16 +363,25 @@ def eval_world_T_camera0_from_parameter(values: Sequence[float]) -> np.ndarray |
 
 
 def save_sparse_map_eval_world_npz(
-    path: Path, points_cam0_xyz: np.ndarray, eval_world_T_camera0: np.ndarray
+    path: Path,
+    points_world_xyz: np.ndarray,
+    eval_world_T_camera0: np.ndarray,
+    world_T_camera0: np.ndarray,
 ) -> None:
-    """Save ``points`` in evaluation world: ``X_eval = T @ homog(X_cam0)`` (``T`` = ``eval_world_T_camera0``)."""
-    X = np.asarray(points_cam0_xyz, dtype=np.float64)
+    """Save points in evaluation world: ``X_eval = T_ce @ inv(W0) @ homog(X_world)``."""
+    X = np.asarray(points_world_xyz, dtype=np.float64)
     if X.size == 0:
         np.savez_compressed(str(path), points=np.zeros((0, 3), dtype=np.float64))
         return
-    T = np.asarray(eval_world_T_camera0, dtype=np.float64)
-    Xh = np.vstack([X.T, np.ones((1, X.shape[0]))])
-    Xe = (T @ Xh)[:3].T.astype(np.float64)
+    T_ce = np.asarray(eval_world_T_camera0, dtype=np.float64)
+    W0 = np.asarray(world_T_camera0, dtype=np.float64)
+    R = W0[:3, :3]
+    t = W0[:3, 3]
+    Rinv = R.T
+    tin = -Rinv @ t
+    Xc = (X @ Rinv.T) + tin
+    Xh = np.vstack([Xc.T, np.ones((1, X.shape[0]))])
+    Xe = (T_ce @ Xh)[:3].T.astype(np.float64)
     np.savez_compressed(str(path), points=Xe)
 
 

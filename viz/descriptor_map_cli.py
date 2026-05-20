@@ -12,7 +12,7 @@ from viz.descriptor_map_runner import run_descriptor_landmark_pipeline
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Build descriptor-based sparse landmark map (camera-0 frame) with multi-baseline pairing.",
+        description="Build descriptor-based sparse landmark map (metric world frame) with multi-baseline pairing.",
     )
     p.add_argument("dataset_root", type=Path, help="Folder with calibration.json, motion.json, images/")
     p.add_argument("--run-dir", type=Path, default=Path("runs") / "descriptor_map", help="Output directory")
@@ -33,7 +33,7 @@ def main() -> None:
         "--spatial-merge-radius-m",
         type=float,
         default=None,
-        help="3D merge gate radius in cam0 (m); omit to use descriptor_map.json or disable",
+        help="3D merge gate radius in world frame (m); omit to use descriptor_map.json or disable",
     )
     p.add_argument(
         "--descriptor-map-config",

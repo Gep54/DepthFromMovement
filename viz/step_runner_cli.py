@@ -48,7 +48,7 @@ def main() -> None:
     p.add_argument(
         "--epipolar",
         action="store_true",
-        help="Write run_dir/epipolar/ with three PDFs (all matches, worst 5, best 5 epipolar pairs)",
+        help="Per pair: steps/epipolar/ PNGs (all matches, best 5 stacked, worst 5 stacked)",
     )
     p.add_argument(
         "--no-cheiral",

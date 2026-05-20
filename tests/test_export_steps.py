@@ -114,29 +114,26 @@ def test_classify_match_rejections_exclusive(mini_dataset_dir: Path) -> None:
         assert not (cls.inlier & cls.cheiral).any()
 
 
-def test_export_epipolar_pdfs(mini_dataset_dir: Path, tmp_path: Path) -> None:
+def test_export_epipolar_pngs_per_pair(mini_dataset_dir: Path, tmp_path: Path) -> None:
+    from viz.recorder import EPIPOLAR_STEP_ORDER
+
     ds = load_dataset(mini_dataset_dir)
     run_dir = tmp_path / "run_epi"
     export_all_stages(ds, run_dir, i=0, j=1, export_epipolar=True)
-    epi_dir = run_dir / "epipolar"
-    for name in (
-        "all_pairs_epilines.pdf",
-        "worst_epipolar_5.pdf",
-        "best_epipolar_5.pdf",
-    ):
-        p = epi_dir / name
-        assert p.is_file(), f"missing {p}"
-        assert p.stat().st_size > 100
+    epi_dir = run_dir / "steps" / "epipolar"
+    assert epi_dir.is_dir()
+    assert len(list(epi_dir.glob("*.png"))) == len(EPIPOLAR_STEP_ORDER)
 
 
-def test_export_epipolar_pdfs_sequence(mini_dataset_dir: Path, tmp_path: Path) -> None:
+def test_export_epipolar_pngs_sequence(mini_dataset_dir: Path, tmp_path: Path) -> None:
+    from viz.recorder import EPIPOLAR_STEP_ORDER
+
     ds = load_dataset(mini_dataset_dir)
     run_root = tmp_path / "seq_epi"
     export_sequence_consecutive_pairs(ds, run_root, pair_lookback=10, export_epipolar=True)
-    epi_dir = run_root / "epipolar"
-    assert (epi_dir / "all_pairs_epilines.pdf").is_file()
-    assert (epi_dir / "worst_epipolar_5.pdf").is_file()
-    assert (epi_dir / "best_epipolar_5.pdf").is_file()
+    pair_epi = run_root / "pairs" / "000_001" / "steps" / "epipolar"
+    assert pair_epi.is_dir()
+    assert len(list(pair_epi.glob("*.png"))) == len(EPIPOLAR_STEP_ORDER)
 
 
 def test_export_sequence_consecutive_pairs(mini_dataset_dir: Path, tmp_path: Path) -> None:

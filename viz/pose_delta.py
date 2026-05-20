@@ -46,6 +46,7 @@ def compute_pair_pose_delta(
     *,
     frame_i: int,
     frame_j: int,
+    world_frame: str | None = None,
 ) -> dict[str, Any]:
     """Numeric summary of pose difference between frames ``i`` and ``j``."""
     R_rel, t_rel = relative_motion_from_world_poses(world_T_i, world_T_j)
@@ -53,7 +54,20 @@ def compute_pair_pose_delta(
     cj = _camera_center_world(world_T_j)
     delta_w = cj - ci
     baseline = float(np.linalg.norm(t_rel))
-    return {
+    Ri = np.asarray(world_T_i[:3, :3], dtype=np.float64)
+    forward_w = Ri[:, 2]
+    dw_norm = float(np.linalg.norm(delta_w))
+    if dw_norm > 1e-9 and np.linalg.norm(forward_w) > 1e-9:
+        motion_vs_optical_deg = float(
+            np.degrees(
+                np.arccos(
+                    np.clip(float(forward_w @ (delta_w / dw_norm)), -1.0, 1.0)
+                )
+            )
+        )
+    else:
+        motion_vs_optical_deg = None
+    out: dict[str, Any] = {
         "frame_i": int(frame_i),
         "frame_j": int(frame_j),
         "camera_i_position_world_m": ci.tolist(),
@@ -63,7 +77,12 @@ def compute_pair_pose_delta(
         "baseline_m": baseline,
         "rotation_cam_i_to_cam_j_deg": _rotation_magnitude_deg(R_rel),
         "rotation_matrix_cam_i_to_cam_j": np.asarray(R_rel, dtype=np.float64).tolist(),
+        "forward_axis_world_m": forward_w.tolist(),
+        "motion_vs_optical_axis_deg": motion_vs_optical_deg,
     }
+    if world_frame:
+        out["world_frame"] = world_frame
+    return out
 
 
 def render_pair_pose_delta(
@@ -111,9 +130,10 @@ def render_pair_pose_delta(
         cv2.putText(plot, label, (p0[0] + 12, p0[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2, cv2.LINE_AA)
         cv2.putText(plot, label, (p0[0] + 12, p0[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
+    wf = summary.get("world_frame", "world")
     cv2.putText(
         plot,
-        "top-down XY (world)",
+        f"top-down XY ({wf})",
         (12, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.65,
@@ -171,11 +191,14 @@ def export_pair_pose_delta(
     *,
     frame_i: int,
     frame_j: int,
+    world_frame: str | None = None,
 ) -> tuple[Path, Path]:
     """Write ``pose_delta.png`` and ``pose_delta.json`` under ``pair_run_dir``."""
     root = Path(pair_run_dir)
     root.mkdir(parents=True, exist_ok=True)
-    summary = compute_pair_pose_delta(world_T_i, world_T_j, frame_i=frame_i, frame_j=frame_j)
+    summary = compute_pair_pose_delta(
+        world_T_i, world_T_j, frame_i=frame_i, frame_j=frame_j, world_frame=world_frame
+    )
     png_path = root / POSE_DELTA_PNG
     json_path = root / POSE_DELTA_JSON
     img = render_pair_pose_delta(summary, world_T_i, world_T_j)

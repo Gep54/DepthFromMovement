@@ -11,29 +11,24 @@ from pipeline.descriptor_landmark_map import (
     DescriptorMapConfig,
     descriptor_distance,
     export_landmarks_csv,
+    project_world_to_camera_uv_z,
     within_merge_sphere,
-    world_point_to_cam0,
 )
 from pipeline.map import TwoViewResult
 
 
-def test_world_point_to_cam0_identity() -> None:
+def test_project_world_to_camera_uv_z_identity() -> None:
     W0 = np.eye(4, dtype=np.float64)
-    Xw = np.array([1.0, -2.0, 5.0])
-    np.testing.assert_allclose(world_point_to_cam0(Xw, W0), Xw)
-
-
-def test_world_point_to_cam0_translation() -> None:
-    """Camera 0 one unit ahead in world X → world point at origin is at (-1,0,0) in cam0."""
-    W0 = np.eye(4, dtype=np.float64)
-    W0[:3, 3] = [1.0, 0.0, 0.0]
-    np.testing.assert_allclose(world_point_to_cam0(np.zeros(3), W0), [-1.0, 0.0, 0.0])
+    K = np.array([[100.0, 0.0, 50.0], [0.0, 100.0, 40.0], [0.0, 0.0, 1.0]])
+    Xw = np.array([[0.0, 0.0, 5.0]])
+    uv, z = project_world_to_camera_uv_z(K, Xw, W0)
+    np.testing.assert_allclose(z, [5.0])
+    np.testing.assert_allclose(uv[0], [50.0, 40.0])
 
 
 def test_ema_default_matches_incremental_mean() -> None:
     cfg = DescriptorMapConfig(method="ORB", merge_beta=None, max_match_distance=256.0)
     m = DescriptorLandmarkMap(cfg)
-    W0 = np.eye(4, dtype=np.float64)
     d = np.zeros((1, 32), dtype=np.uint8)
 
     def tw_from_z(z: float) -> TwoViewResult:
@@ -56,15 +51,14 @@ def test_ema_default_matches_incremental_mean() -> None:
             descriptors=d.copy(),
         )
 
-    m.integrate(tw_from_z(2.0), W0)
-    m.integrate(tw_from_z(8.0), W0)
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 5.0)
+    m.integrate(tw_from_z(2.0))
+    m.integrate(tw_from_z(8.0))
+    np.testing.assert_allclose(m.landmarks[0].position_world[2], 5.0)
 
 
 def test_fixed_merge_beta_differs_from_mean() -> None:
     cfg = DescriptorMapConfig(method="ORB", merge_beta=0.25, max_match_distance=256.0)
     m = DescriptorLandmarkMap(cfg)
-    W0 = np.eye(4, dtype=np.float64)
     d = np.ones((1, 32), dtype=np.uint8)
 
     def tw(z: float) -> TwoViewResult:
@@ -87,16 +81,15 @@ def test_fixed_merge_beta_differs_from_mean() -> None:
             descriptors=d.copy(),
         )
 
-    m.integrate(tw(2.0), W0)
-    m.integrate(tw(8.0), W0)
+    m.integrate(tw(2.0))
+    m.integrate(tw(8.0))
     # Mean would be 5.0; beta=0.25 gives 0.75*2 + 0.25*8 = 3.5
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 3.5)
+    np.testing.assert_allclose(m.landmarks[0].position_world[2], 3.5)
 
 
 def test_replace_if_better_updates_prototype() -> None:
     cfg = DescriptorMapConfig(method="ORB", merge_beta=None, max_match_distance=512.0)
     m = DescriptorLandmarkMap(cfg)
-    W0 = np.eye(4, dtype=np.float64)
     proto = np.zeros((1, 32), dtype=np.uint8)
     proto_obs = np.zeros((4, 1), dtype=np.float64)
     proto_obs[:3, 0] = [0.0, 0.0, 2.0]
@@ -116,7 +109,7 @@ def test_replace_if_better_updates_prototype() -> None:
         cheiral_mask=np.array([True]),
         descriptors=proto.copy(),
     )
-    m.integrate(tw1, W0)
+    m.integrate(tw1)
     stored = m.landmarks[0].descriptor.copy()
 
     alt = np.ones((1, 32), dtype=np.uint8)
@@ -137,7 +130,7 @@ def test_replace_if_better_updates_prototype() -> None:
         cheiral_mask=np.array([True]),
         descriptors=alt.copy(),
     )
-    m.integrate(tw2, W0)
+    m.integrate(tw2)
     assert np.any(stored != m.landmarks[0].descriptor)
 
 
@@ -181,10 +174,9 @@ def test_spatial_gate_rejects_distant_descriptor_match() -> None:
         spatial_merge_radius_m=1.0,
     )
     m = DescriptorLandmarkMap(cfg)
-    W0 = np.eye(4, dtype=np.float64)
     d = np.zeros((32,), dtype=np.uint8)
-    m.integrate(_tw_single_point(2.0, d), W0)
-    m.integrate(_tw_single_point(10.0, d), W0)
+    m.integrate(_tw_single_point(2.0, d))
+    m.integrate(_tw_single_point(10.0, d))
     assert len(m.landmarks) == 2
 
 
@@ -196,12 +188,11 @@ def test_spatial_gate_allows_near_descriptor_match() -> None:
         spatial_merge_radius_m=1.0,
     )
     m = DescriptorLandmarkMap(cfg)
-    W0 = np.eye(4, dtype=np.float64)
     d = np.zeros((32,), dtype=np.uint8)
-    m.integrate(_tw_single_point(2.0, d), W0)
-    m.integrate(_tw_single_point(2.5, d), W0)
+    m.integrate(_tw_single_point(2.0, d))
+    m.integrate(_tw_single_point(2.5, d))
     assert len(m.landmarks) == 1
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 2.25)
+    np.testing.assert_allclose(m.landmarks[0].position_world[2], 2.25)
 
 
 def test_load_descriptor_map_json_defaults(tmp_path: Path) -> None:
@@ -218,11 +209,11 @@ def test_load_descriptor_map_json_spatial_radius(tmp_path: Path) -> None:
     assert cfg.spatial_merge_radius_m == 0.5
 
 
-def test_integrate_max_range_cam0_skips_far_points() -> None:
+def test_integrate_max_range_world_skips_far_points() -> None:
     cfg = DescriptorMapConfig(method="ORB", merge_beta=None, max_match_distance=256.0)
     m = DescriptorLandmarkMap(cfg)
-    W0 = np.eye(4, dtype=np.float64)
     d = np.zeros((2, 32), dtype=np.uint8)
+    anchor = np.zeros(3, dtype=np.float64)
 
     def tw_points(z_near: float, z_far: float) -> TwoViewResult:
         X = np.zeros((4, 2), dtype=np.float64)
@@ -245,15 +236,15 @@ def test_integrate_max_range_cam0_skips_far_points() -> None:
             descriptors=d.copy(),
         )
 
-    m.integrate(tw_points(2.0, 200.0), W0, max_range_cam0=50.0)
+    m.integrate(tw_points(2.0, 200.0), anchor_position_world=anchor, max_range_world=50.0)
     assert len(m.landmarks) == 1
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 2.0)
+    np.testing.assert_allclose(m.landmarks[0].position_world[2], 2.0)
 
 
-def test_prune_beyond_range_cam0() -> None:
+def test_prune_beyond_range_world() -> None:
     cfg = DescriptorMapConfig(method="ORB", merge_beta=None, max_match_distance=8.0)
     m = DescriptorLandmarkMap(cfg)
-    W0 = np.eye(4, dtype=np.float64)
+    anchor = np.zeros(3, dtype=np.float64)
 
     def tw(z: float, desc_byte: int) -> TwoViewResult:
         d = np.full((1, 32), desc_byte, dtype=np.uint8)
@@ -276,19 +267,18 @@ def test_prune_beyond_range_cam0() -> None:
             descriptors=d,
         )
 
-    m.integrate(tw(2.0, 0), W0)
-    m.integrate(tw(80.0, 255), W0)
+    m.integrate(tw(2.0, 0))
+    m.integrate(tw(80.0, 255))
     assert len(m.landmarks) == 2
-    removed = m.prune_beyond_range_cam0(50.0)
+    removed = m.prune_beyond_range_world(50.0, anchor)
     assert removed == 1
     assert len(m.landmarks) == 1
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 2.0)
+    np.testing.assert_allclose(m.landmarks[0].position_world[2], 2.0)
 
 
 def test_export_landmarks_csv_roundtrip(tmp_path: Path) -> None:
     cfg = DescriptorMapConfig(method="ORB", merge_beta=None, max_match_distance=256.0)
     m = DescriptorLandmarkMap(cfg)
-    W0 = np.eye(4, dtype=np.float64)
     d = np.full((1, 32), 7, dtype=np.uint8)
     X = np.zeros((4, 1), dtype=np.float64)
     X[:3, 0] = [1.0, 2.0, 3.0]
@@ -308,11 +298,11 @@ def test_export_landmarks_csv_roundtrip(tmp_path: Path) -> None:
         cheiral_mask=np.array([True]),
         descriptors=d,
     )
-    m.integrate(tw, W0)
+    m.integrate(tw)
     outp = tmp_path / "lm.csv"
     export_landmarks_csv(outp, m)
     text = outp.read_text(encoding="utf-8")
-    assert "id,x_cam0,y_cam0,z_cam0,n_updates,descriptor_hex" in text
+    assert "id,x_world,y_world,z_world,n_updates,descriptor_hex" in text
     assert str(m.landmarks[0].id) in text
 
 

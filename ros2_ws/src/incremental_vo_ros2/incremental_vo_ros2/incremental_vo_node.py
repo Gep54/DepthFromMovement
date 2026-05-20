@@ -52,7 +52,6 @@ from incremental_vo_ros2.support import (
     save_sparse_map_eval_world_npz,
     save_sparse_map_npz,
     should_buffer_image,
-    transform_points_world_T_camera,
     effective_K_from_calibration,
     world_T_camera_from_odom,
     world_T_camera_to_quaternion_xyzw,
@@ -356,7 +355,6 @@ class IncrementalVoNode(Node):
         self._desc_map = None
         self._effective_desc_cfg = None
         self._persisted = False
-        self._world_T_camera_raw: list[np.ndarray] = []
         self._tf_buffer: Buffer | None = None
         self._tf_listener: TransformListener | None = None
 
@@ -728,8 +726,6 @@ class IncrementalVoNode(Node):
         self._commit_keyframe(chosen, distance_trigger_m=dist)
 
     def _commit_keyframe(self, bf: BufferedFrame, *, distance_trigger_m: float | None) -> None:
-        from pipeline.geometry import canonicalize_world_T_camera_to_first
-
         odom_msg = self._odom_history.nearest(bf.stamp_sec, bf.stamp_nsec)
         if odom_msg is None and self._last_odom is not None:
             odom_msg = self._last_odom
@@ -744,8 +740,8 @@ class IncrementalVoNode(Node):
             bf.qx, bf.qy, bf.qz, bf.qw = float(qx), float(qy), float(qz), float(qw)
 
         prev_spacing_m: float | None = None
-        if self._world_T_camera_raw:
-            prev_t = self._world_T_camera_raw[-1][:3, 3]
+        if self._world_T_camera:
+            prev_t = self._world_T_camera[-1][:3, 3]
             prev_spacing_m = float(np.linalg.norm(bf.pos_odom - prev_t))
 
         gray, k_eff = image_msg_to_gray_undistorted(bf.image_msg, self._calibration)
@@ -759,7 +755,7 @@ class IncrementalVoNode(Node):
             self._K = k_eff
             self._init_map_if_possible()
 
-        idx = len(self._world_T_camera_raw)
+        idx = len(self._world_T_camera)
 
         log_path = ""
         manifest_path = ""
@@ -787,8 +783,7 @@ class IncrementalVoNode(Node):
         elif log_path:
             manifest_path = log_path
 
-        self._world_T_camera_raw.append(bf.cam_to_world.copy())
-        self._world_T_camera[:] = canonicalize_world_T_camera_to_first(self._world_T_camera_raw)
+        self._world_T_camera.append(bf.cam_to_world.copy())
         self._gray_kf.append(gray)
 
         rec = {
@@ -817,18 +812,20 @@ class IncrementalVoNode(Node):
             msg += f" | odom spacing ~{distance_trigger_m:.3f} m (threshold {self._d})"
         self.get_logger().info(msg)
 
-        max_range_cam0: float | None = None
+        max_range_world: float | None = None
+        anchor_world: np.ndarray | None = None
         if idx >= 1 and len(self._world_T_camera) > idx:
             baseline_m = consecutive_keyframe_baseline_m(
                 self._world_T_camera[idx - 1], self._world_T_camera[idx]
             )
             self._last_consecutive_baseline_m = baseline_m
-            max_range_cam0 = max_sparse_range_m(baseline_m, self._sparse_map_range_factor)
-            if max_range_cam0 is not None and self._desc_map is not None:
-                pruned = self._desc_map.prune_beyond_range_cam0(max_range_cam0)
+            max_range_world = max_sparse_range_m(baseline_m, self._sparse_map_range_factor)
+            anchor_world = np.asarray(self._world_T_camera[idx][:3, 3], dtype=np.float64)
+            if max_range_world is not None and self._desc_map is not None:
+                pruned = self._desc_map.prune_beyond_range_world(max_range_world, anchor_world)
                 self.get_logger().info(
                     f"Sparse range gate keyframe {idx}: baseline={baseline_m:.4f} m "
-                    f"max_range_cam0={max_range_cam0:.4f} m pruned={pruned}"
+                    f"max_range_world={max_range_world:.4f} m pruned={pruned}"
                 )
 
         if idx >= 1 and self._inc_map is not None:
@@ -838,16 +835,12 @@ class IncrementalVoNode(Node):
                     tw = self._inc_map.add_frame_pair(
                         i, idx, self._gray_kf[i], self._gray_kf[idx]
                     )
-                    if (
-                        tw.scale_ok
-                        and self._desc_map is not None
-                        and len(self._world_T_camera) > 0
-                    ):
+                    if tw.scale_ok and self._desc_map is not None:
                         try:
                             self._desc_map.integrate(
                                 tw,
-                                self._world_T_camera[0],
-                                max_range_cam0=max_range_cam0,
+                                anchor_position_world=anchor_world,
+                                max_range_world=max_range_world,
                                 spatial_merge_radius_m=self._d,
                             )
                         except Exception as ex:
@@ -892,13 +885,11 @@ class IncrementalVoNode(Node):
 
     def _on_sparse_map_timer(self) -> None:
         pub = self._sparse_map_pub
-        if pub is None or self._desc_map is None or not self._world_T_camera_raw:
+        if pub is None or self._desc_map is None or not self._world_T_camera:
             return
-        pts_c = self._desc_map.positions_cam0()
-        if pts_c.size == 0:
+        pts_w = self._desc_map.positions_world()
+        if pts_w.size == 0:
             return
-        W0 = self._world_T_camera_raw[0]
-        pts_w = transform_points_world_T_camera(pts_c, W0)
         if self._sparse_map_frame_id_override:
             fid = self._sparse_map_frame_id_override
         elif self._last_odom is not None:
@@ -998,8 +989,8 @@ class IncrementalVoNode(Node):
                 if self._effective_desc_cfg is not None
                 else None
             ),
-            landmarks_reference_frame="camera_0" if self._desc_map is not None else None,
-            map_coordinate_frame="camera0",
+            landmarks_reference_frame=header_frame or None if self._desc_map is not None else None,
+            map_coordinate_frame=header_frame or None,
             eval_world_T_camera0_flat16=(
                 self._eval_world_T_cam0.reshape(16).tolist()
                 if self._eval_world_T_cam0 is not None
@@ -1008,11 +999,14 @@ class IncrementalVoNode(Node):
         )
         pts = np.zeros((0, 3), dtype=np.float64)
         if self._desc_map is not None:
-            pts = self._desc_map.positions_cam0()
+            pts = self._desc_map.positions_world()
         save_sparse_map_npz(self._run_dir / "sparse_map.npz", pts)
-        if self._eval_world_T_cam0 is not None:
+        if self._eval_world_T_cam0 is not None and self._world_T_camera:
             save_sparse_map_eval_world_npz(
-                self._run_dir / "sparse_map_eval_world.npz", pts, self._eval_world_T_cam0
+                self._run_dir / "sparse_map_eval_world.npz",
+                pts,
+                self._eval_world_T_cam0,
+                self._world_T_camera[0],
             )
         if self._desc_map is not None:
             try:
@@ -1025,7 +1019,7 @@ class IncrementalVoNode(Node):
                 self.get_logger().warn(f"export_landmarks_csv failed: {e}")
         self.get_logger().info(
             f"Saved run: {self._run_dir} ({len(self._kf_records)} keyframes, "
-            f"{pts.shape[0]} descriptor landmarks in cam0 frame)"
+            f"{pts.shape[0]} descriptor landmarks in metric world frame)"
         )
 
     def destroy_node(self) -> None:
