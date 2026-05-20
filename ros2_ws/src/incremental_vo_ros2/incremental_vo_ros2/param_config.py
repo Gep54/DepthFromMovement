@@ -40,6 +40,8 @@ KNOWN_PARAMETERS = frozenset(
         "sparse_map_publish_period_s",
         "sparse_map_frame_id",
         "sparse_map_max_range_baseline_factor",
+        "publish_sparse_map_true",
+        "sparse_map_true_topic",
         "save_run_on_shutdown",
         "export_offline_dataset",
         "offline_dataset_root",
