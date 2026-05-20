@@ -595,14 +595,17 @@ class IncrementalVoNode(Node):
     def _world_T_camera_from_odom_msg(
         self, odom: Odometry, *, stamp_sec: int, stamp_nsec: int
     ) -> np.ndarray:
-        stamp = self._image_time(stamp_sec, stamp_nsec)
+        """Metric camera pose at the image/odom stamp (never ``tf_use_latest_time``)."""
+        from builtin_interfaces.msg import Time as TimeMsg
+
+        stamp = Time.from_msg(TimeMsg(sec=int(stamp_sec), nanosec=int(stamp_nsec)))
         return world_T_camera_from_odom(
             odom,
             self._tf_buffer,
             camera_frame=self._camera_frame,
             base_frame=self._base_frame,
             stamp=stamp,
-            use_latest_tf=self._tf_use_latest,
+            use_latest_tf=False,
             apply_tf=self._apply_tf_to_camera_pose,
         )
 
