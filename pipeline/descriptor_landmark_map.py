@@ -8,6 +8,7 @@ from typing import Literal
 import cv2
 import numpy as np
 
+from pipeline.frame_axes import opencv_cam_point_to_cam0
 from pipeline.geometry import invert_se3
 from pipeline.map import TwoViewResult
 
@@ -59,7 +60,7 @@ class DescriptorMapConfig:
 class DescriptorLandmark:
     id: int
     position_cam0: np.ndarray
-    """(3,) float64 in first-camera frame."""
+    """(3,) float64 in keyframe-0 frame (body/FCU axes, not raw OpenCV optical)."""
     n_updates: int
     descriptor: np.ndarray
     best_merge_distance: float = field(default_factory=lambda: float("inf"))
@@ -133,11 +134,12 @@ class DescriptorLandmarkMap:
         self,
         tw: TwoViewResult,
         world_T_camera_0: np.ndarray,
+        world_T_camera_j: np.ndarray,
         *,
         max_range_cam0: float | None = None,
         spatial_merge_radius_m: float | None = None,
     ) -> None:
-        """Ingest triangulated points from ``tw``; transform to cam0 before fusion."""
+        """Ingest triangulated points from ``tw``; map current frame j (OpenCV) -> cam0 before fusion."""
         if tw.descriptors is None or tw.descriptors.shape[0] == 0:
             return
         n = tw.X_world_h.shape[1]
@@ -146,6 +148,7 @@ class DescriptorLandmarkMap:
                 f"descriptors rows ({tw.descriptors.shape[0]}) != X columns ({n})"
             )
         W0 = np.asarray(world_T_camera_0, dtype=np.float64)
+        Wj = np.asarray(world_T_camera_j, dtype=np.float64)
         radius = (
             spatial_merge_radius_m
             if spatial_merge_radius_m is not None
@@ -158,7 +161,7 @@ class DescriptorLandmarkMap:
             Xw = tw.X_world_h[:3, k]
             if not np.all(np.isfinite(Xw)):
                 continue
-            X_cam0 = world_point_to_cam0(Xw, W0)
+            X_cam0 = opencv_cam_point_to_cam0(Xw, W0, Wj)
             if max_range_cam0 is not None and float(np.linalg.norm(X_cam0)) > max_range_cam0:
                 continue
             d_obs = tw.descriptors[k]

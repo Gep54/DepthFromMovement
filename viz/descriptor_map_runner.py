@@ -84,6 +84,7 @@ def run_descriptor_landmark_pipeline(
         desc_map.integrate(
             tw,
             W0,
+            ds.world_T_camera[j],
             spatial_merge_radius_m=desc_cfg.spatial_merge_radius_m,
         )
         if save_iter_viz:

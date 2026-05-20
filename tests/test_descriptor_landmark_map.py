@@ -57,9 +57,10 @@ def test_ema_default_matches_incremental_mean() -> None:
             descriptors=d.copy(),
         )
 
-    m.integrate(tw_from_z(2.0), W0)
-    m.integrate(tw_from_z(8.0), W0)
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 5.0)
+    W1 = W0
+    m.integrate(tw_from_z(2.0), W0, W1)
+    m.integrate(tw_from_z(8.0), W0, W1)
+    np.testing.assert_allclose(m.landmarks[0].position_cam0[0], 5.0)
 
 
 def test_fixed_merge_beta_differs_from_mean() -> None:
@@ -89,10 +90,11 @@ def test_fixed_merge_beta_differs_from_mean() -> None:
             descriptors=d.copy(),
         )
 
-    m.integrate(tw(2.0), W0)
-    m.integrate(tw(8.0), W0)
+    W1 = W0
+    m.integrate(tw(2.0), W0, W1)
+    m.integrate(tw(8.0), W0, W1)
     # Mean would be 5.0; beta=0.25 gives 0.75*2 + 0.25*8 = 3.5
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 3.5)
+    np.testing.assert_allclose(m.landmarks[0].position_cam0[0], 3.5)
 
 
 def test_replace_if_better_updates_prototype() -> None:
@@ -119,7 +121,7 @@ def test_replace_if_better_updates_prototype() -> None:
         reproj={},
         descriptors=proto.copy(),
     )
-    m.integrate(tw1, W0)
+    m.integrate(tw1, W0, W0)
     stored = m.landmarks[0].descriptor.copy()
 
     alt = np.ones((1, 32), dtype=np.uint8)
@@ -141,7 +143,7 @@ def test_replace_if_better_updates_prototype() -> None:
         reproj={},
         descriptors=alt.copy(),
     )
-    m.integrate(tw2, W0)
+    m.integrate(tw2, W0, W0)
     assert np.any(stored != m.landmarks[0].descriptor)
 
 
@@ -188,8 +190,9 @@ def test_spatial_gate_rejects_distant_descriptor_match() -> None:
     m = DescriptorLandmarkMap(cfg)
     W0 = np.eye(4, dtype=np.float64)
     d = np.zeros((32,), dtype=np.uint8)
-    m.integrate(_tw_single_point(2.0, d), W0)
-    m.integrate(_tw_single_point(10.0, d), W0)
+    W1 = W0
+    m.integrate(_tw_single_point(2.0, d), W0, W1)
+    m.integrate(_tw_single_point(10.0, d), W0, W1)
     assert len(m.landmarks) == 2
 
 
@@ -203,10 +206,11 @@ def test_spatial_gate_allows_near_descriptor_match() -> None:
     m = DescriptorLandmarkMap(cfg)
     W0 = np.eye(4, dtype=np.float64)
     d = np.zeros((32,), dtype=np.uint8)
-    m.integrate(_tw_single_point(2.0, d), W0)
-    m.integrate(_tw_single_point(2.5, d), W0)
+    W1 = W0
+    m.integrate(_tw_single_point(2.0, d), W0, W1)
+    m.integrate(_tw_single_point(2.5, d), W0, W1)
     assert len(m.landmarks) == 1
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 2.25)
+    np.testing.assert_allclose(m.landmarks[0].position_cam0[0], 2.25)
 
 
 def test_load_descriptor_map_json_defaults(tmp_path: Path) -> None:
@@ -251,9 +255,10 @@ def test_integrate_max_range_cam0_skips_far_points() -> None:
             descriptors=d.copy(),
         )
 
-    m.integrate(tw_points(2.0, 200.0), W0, max_range_cam0=50.0)
+    W1 = W0
+    m.integrate(tw_points(2.0, 200.0), W0, W1, max_range_cam0=50.0)
     assert len(m.landmarks) == 1
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 2.0)
+    np.testing.assert_allclose(m.landmarks[0].position_cam0[0], 2.0)
 
 
 def test_prune_beyond_range_cam0() -> None:
@@ -283,13 +288,14 @@ def test_prune_beyond_range_cam0() -> None:
             descriptors=d,
         )
 
-    m.integrate(tw(2.0, 0), W0)
-    m.integrate(tw(80.0, 255), W0)
+    W1 = W0
+    m.integrate(tw(2.0, 0), W0, W1)
+    m.integrate(tw(80.0, 255), W0, W1)
     assert len(m.landmarks) == 2
     removed = m.prune_beyond_range_cam0(50.0)
     assert removed == 1
     assert len(m.landmarks) == 1
-    np.testing.assert_allclose(m.landmarks[0].position_cam0[2], 2.0)
+    np.testing.assert_allclose(m.landmarks[0].position_cam0[0], 2.0)
 
 
 def test_export_landmarks_csv_roundtrip(tmp_path: Path) -> None:
@@ -316,7 +322,7 @@ def test_export_landmarks_csv_roundtrip(tmp_path: Path) -> None:
         reproj={},
         descriptors=d,
     )
-    m.integrate(tw, W0)
+    m.integrate(tw, W0, W0)
     outp = tmp_path / "lm.csv"
     export_landmarks_csv(outp, m)
     text = outp.read_text(encoding="utf-8")

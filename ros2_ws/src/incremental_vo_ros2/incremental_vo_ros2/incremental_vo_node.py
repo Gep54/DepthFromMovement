@@ -52,7 +52,7 @@ from incremental_vo_ros2.support import (
     save_sparse_map_eval_world_npz,
     save_sparse_map_npz,
     should_buffer_image,
-    transform_points_opencv_cam0_to_world,
+    transform_points_world_T_camera,
     effective_K_from_calibration,
     world_T_camera_to_quaternion_xyzw,
 )
@@ -826,6 +826,7 @@ class IncrementalVoNode(Node):
                             self._desc_map.integrate(
                                 tw,
                                 self._world_T_camera[0],
+                                self._world_T_camera[tw.frame_j],
                                 max_range_cam0=max_range_cam0,
                                 spatial_merge_radius_m=self._d,
                             )
@@ -904,6 +905,7 @@ class IncrementalVoNode(Node):
                             self._desc_map_true.integrate(
                                 tw,
                                 self._world_T_camera_true[0],
+                                self._world_T_camera_true[tw.frame_j],
                                 max_range_cam0=max_range_cam0,
                                 spatial_merge_radius_m=self._d,
                             )
@@ -974,7 +976,7 @@ class IncrementalVoNode(Node):
         if pts_c.size == 0:
             return
         W0 = world_T_camera_raw[0]
-        pts_w = transform_points_opencv_cam0_to_world(pts_c, W0)
+        pts_w = transform_points_world_T_camera(pts_c, W0)
         fid = self._sparse_map_frame_id()
         if not fid:
             return
