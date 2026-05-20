@@ -23,12 +23,12 @@ def test_add_frame_pair_pose_from_motion_json(
                         [90.0, 90.0], [100.0, 100.0]], dtype=np.float32)
         return pts, pts + np.array([2.0, 0.0], dtype=np.float32), []
 
-    def _all_inliers(pts1: np.ndarray, *_args, **_kwargs) -> tuple[np.ndarray, np.ndarray]:
-        n = pts1.shape[0]
+    def _all_inliers(*_args, **_kwargs) -> tuple[np.ndarray, np.ndarray]:
+        n = _args[0].shape[0] if _args else 0
         return np.eye(3, dtype=np.float64), np.ones((n, 1), np.uint8)
 
     monkeypatch.setattr(map_mod, "match_pair_points", _synthetic_matches)
-    monkeypatch.setattr(cv2, "findEssentialMat", _all_inliers)
+    monkeypatch.setattr(map_mod, "epipolar_inlier_mask_from_motion", _all_inliers)
 
     ds = load_dataset(mini_dataset_dir)
     K = ds.calibration.K

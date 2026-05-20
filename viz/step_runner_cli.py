@@ -60,7 +60,7 @@ def main() -> None:
         type=float,
         default=3.0,
         metavar="PX",
-        help="RANSAC epipolar distance threshold in pixels (default 3.0; larger = looser)",
+        help="Motion epipolar distance threshold in pixels (default 3.0; larger = looser)",
     )
     p.add_argument(
         "--cheiral-min-z",

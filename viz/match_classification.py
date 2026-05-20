@@ -27,7 +27,7 @@ def classify_match_rejections(
     """
     Classify each match into exactly one category (priority: epipolar → cheiral → inlier).
 
-    Cheiral applies only to epipolar RANSAC inliers; triangulation columns align with those.
+    Cheiral applies only to motion-epipolar inliers; triangulation columns align with those.
     """
     n = len(tw.pts1)
     epi = np.zeros(n, dtype=bool)

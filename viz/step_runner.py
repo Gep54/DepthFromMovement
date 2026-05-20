@@ -61,8 +61,9 @@ def _log_progress(message: str) -> None:
 
 
 def fundamental_from_essential(E: np.ndarray, K: np.ndarray) -> np.ndarray:
-    Kinv = np.linalg.inv(K)
-    return Kinv.T @ E @ Kinv
+    from pipeline.geometry import fundamental_from_essential as _f_from_e
+
+    return _f_from_e(E, K)
 
 
 def epipolar_pair_view(

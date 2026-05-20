@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import cv2
 import numpy as np
 
 from pipeline.config import FeatureConfig
 from pipeline.geometry import (
+    epipolar_inlier_mask_from_motion,
     essential_from_R_t,
     essential_from_world_poses,
     relative_motion_from_world_poses,
@@ -18,14 +18,14 @@ from pipeline.triangulation import triangulate_cam1_frame, cam1_to_world_points
 from pipeline.features import FrameFeatures, detect_and_compute
 @dataclass
 class MapConfig:
-    """Two-view geometry: RANSAC essential for match filtering; R,t from provided world poses."""
+    """Two-view geometry: epipolar gate from motion E; R,t from provided world poses."""
 
     ransac_epipolar_thresh: float = 3.0
-    """RANSAC epipolar distance threshold (px); larger accepts more matches."""
+    """Max symmetric epipolar distance (px) vs motion essential matrix; larger accepts more matches."""
     min_parallax_deg: float = 0.5
     check_cheiral: bool = True
     """If False, keep all triangulated epipolar inliers (no Z-depth rejection)."""
-    cheiral_min_z: float = -0.01
+    cheiral_min_z: float = 0.1
     """Camera-frame Z must exceed this (metres) in both views when ``check_cheiral`` is on."""
 
 
@@ -108,13 +108,13 @@ class IncrementalMap:
         Wj = self.world_T_camera[j]
         R_motion, t_motion = relative_motion_from_world_poses(Wi, Wj)
 
-        E_fm, mask = cv2.findEssentialMat(
+        E_motion, mask = epipolar_inlier_mask_from_motion(
             pts1,
             pts2,
+            R_motion,
+            t_motion,
             self.K,
-            method=cv2.RANSAC,
-            prob=0.999,
-            threshold=self.cfg.ransac_epipolar_thresh,
+            distance_thresh_px=self.cfg.ransac_epipolar_thresh,
         )
 
         inlier = mask.ravel().astype(bool)
@@ -154,9 +154,9 @@ class IncrementalMap:
         scale = baseline if scale_ok else 1.0
 
         if not scale_ok:
-            return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
+            return _failure_result(E_motion)
 
-        E = essential_from_R_t(R_est, t_est)
+        E = E_motion
         X_cam_h, cheiral = triangulate_cam1_frame(
             pts1_i,
             pts2_i,
