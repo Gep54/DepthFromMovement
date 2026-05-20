@@ -216,6 +216,7 @@ def save_keyframe_manifest(
     descriptor_ratio_second_best: float | None = None,
     landmarks_reference_frame: str | None = None,
     map_coordinate_frame: str | None = None,
+    triangulation_motion_source: str | None = None,
     eval_world_T_camera0_flat16: Sequence[float] | None = None,
 ) -> None:
     payload = {
@@ -251,6 +252,8 @@ def save_keyframe_manifest(
         payload["landmarks_reference_frame"] = landmarks_reference_frame
     if map_coordinate_frame is not None:
         payload["map_coordinate_frame"] = map_coordinate_frame
+    if triangulation_motion_source is not None:
+        payload["triangulation_motion_source"] = triangulation_motion_source
     if eval_world_T_camera0_flat16 is not None:
         payload["eval_world_T_camera0"] = [float(x) for x in eval_world_T_camera0_flat16]
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

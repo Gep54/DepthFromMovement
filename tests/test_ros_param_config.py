@@ -159,6 +159,19 @@ def test_apply_config_skips_empty_values(tmp_path: Path, monkeypatch: pytest.Mon
             assert tok.partition(":=")[2] != "", tok
 
 
+def test_apply_config_triangulation_motion_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "configuration.env"
+    cfg.write_text("triangulation_motion_source=odometry_pose\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("INCREMENTAL_VO_CONFIG", raising=False)
+
+    argv = apply_config_to_argv(["--config-file", str(cfg)])
+    merged = extract_cli_param_overrides(argv)
+    assert merged["triangulation_motion_source"] == "odometry_pose"
+
+
 def test_apply_config_camera_info_qos_durability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

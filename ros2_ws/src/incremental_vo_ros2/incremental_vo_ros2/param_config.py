@@ -57,6 +57,7 @@ KNOWN_PARAMETERS = frozenset(
         "descriptor_merge_beta",
         "descriptor_max_match_distance",
         "descriptor_ratio_second_best",
+        "triangulation_motion_source",
         "fusion_method",
         "fusion_position_blend_weight",
         "provided_pose_topic",

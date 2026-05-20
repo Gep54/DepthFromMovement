@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from data.dataset import load_dataset
+from pipeline.map import MapConfig
 from viz.step_runner import (
     ensure_all_step_pngs_exist,
     ensure_sequence_outputs_exist,
@@ -52,8 +53,15 @@ def main() -> None:
         default=None,
         help="Path for rejection_audit.jsonl (default: <run-dir>/rejection_audit.jsonl)",
     )
+    p.add_argument(
+        "--triangulation-motion-source",
+        choices=("vision_scale", "odometry_pose"),
+        default="vision_scale",
+        help="How odometry enters two-view triangulation (default vision_scale)",
+    )
     args = p.parse_args()
     ds = load_dataset(args.dataset_root)
+    map_cfg = MapConfig(triangulation_motion_source=args.triangulation_motion_source)
     include_geometry = not args.no_geometry_stages
     audit_path = args.rejection_audit
     if args.sequence:
@@ -62,6 +70,7 @@ def main() -> None:
             args.run_dir,
             fuse_merge_px=args.fuse_merge_px,
             pair_lookback=args.pair_lookback,
+            map_cfg=map_cfg,
             include_geometry=include_geometry,
             reproj_thresh_px=args.reproj_outlier_px,
             rejection_audit_path=audit_path,
@@ -78,6 +87,7 @@ def main() -> None:
             args.run_dir,
             i=args.i,
             j=args.j,
+            map_cfg=map_cfg,
             include_geometry=include_geometry,
             reproj_thresh_px=args.reproj_outlier_px,
             rejection_audit_path=audit_path,

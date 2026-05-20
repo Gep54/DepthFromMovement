@@ -175,6 +175,8 @@ class IncrementalVoNode(Node):
         self.declare_parameter("descriptor_merge_beta", -1.0)
         self.declare_parameter("descriptor_max_match_distance", -1.0)
         self.declare_parameter("descriptor_ratio_second_best", -1.0)
+        # vision_scale: vision R + odom translation norm | odometry_pose: full relative R,t from poses
+        self.declare_parameter("triangulation_motion_source", "vision_scale")
 
         # Metric pose fusion (odometry vs optional external ``world_T_camera``).
         self.declare_parameter("fusion_method", "position_blend")
@@ -264,6 +266,20 @@ class IncrementalVoNode(Node):
         self._descriptor_ratio_second_best = float(
             self.get_parameter("descriptor_ratio_second_best").get_parameter_value().double_value
         )
+        motion_src_raw = (
+            self.get_parameter("triangulation_motion_source")
+            .get_parameter_value()
+            .string_value.strip()
+            .lower()
+        )
+        if motion_src_raw in ("vision_scale", "odometry_pose"):
+            self._triangulation_motion_source = motion_src_raw
+        else:
+            self.get_logger().warning(
+                f"triangulation_motion_source={motion_src_raw!r} not in "
+                "{{vision_scale, odometry_pose}}; using vision_scale."
+            )
+            self._triangulation_motion_source = "vision_scale"
         self._publish_sparse_map = (
             self.get_parameter("publish_sparse_map").get_parameter_value().bool_value
         )
@@ -478,6 +494,7 @@ class IncrementalVoNode(Node):
                 if self._sparse_map_range_factor > 0.0
                 else " | sparse_map range filter disabled (factor<=0)"
             )
+            + f" | triangulation_motion_source={self._triangulation_motion_source!r}"
         )
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
@@ -556,7 +573,7 @@ class IncrementalVoNode(Node):
             self.get_logger().error(f"Could not import pipeline: {e}")
             return
 
-        cfg = MapConfig()
+        cfg = MapConfig(triangulation_motion_source=self._triangulation_motion_source)
         feat = FeatureConfig(method=self._feature_method, n_features=self._feature_n)
         if self._inc_map is None:
             self._inc_map = IncrementalMap(
@@ -1083,6 +1100,7 @@ class IncrementalVoNode(Node):
             ),
             landmarks_reference_frame="camera_0" if self._desc_map is not None else None,
             map_coordinate_frame="camera0",
+            triangulation_motion_source=self._triangulation_motion_source,
             eval_world_T_camera0_flat16=(
                 self._eval_world_T_cam0.reshape(16).tolist()
                 if self._eval_world_T_cam0 is not None

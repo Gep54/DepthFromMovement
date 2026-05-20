@@ -170,6 +170,7 @@ def export_single_pair_stages(
     feat_cfg: FeatureConfig | None = None,
     reuse_two_view: TwoViewResult | None = None,
     frame_features_cache: Sequence[FrameFeatures] | None = None,
+    map_cfg: MapConfig | None = None,
     include_geometry: bool = True,
     reproj_thresh_px: float = 3.0,
     rejection_audit_path: str | Path | None = None,
@@ -206,8 +207,8 @@ def export_single_pair_stages(
         assert reuse_two_view.frame_i == i and reuse_two_view.frame_j == j
         tw = reuse_two_view
     else:
-        map_cfg = MapConfig()
-        m = IncrementalMap(cfg=map_cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
+        cfg = map_cfg if map_cfg is not None else MapConfig()
+        m = IncrementalMap(cfg=cfg, feat_cfg=feat_cfg, K=K, world_T_camera=ds.world_T_camera)
         tw = m.add_frame_pair(i, j, g_i, g_j, features_i=fi, features_j=fj)
 
     pts1, pts2 = tw.pts1, tw.pts2
@@ -263,6 +264,7 @@ def export_all_stages(
     j: int = 1,
     feat_cfg: FeatureConfig | None = None,
     frame_features_cache: Sequence[FrameFeatures] | None = None,
+    map_cfg: MapConfig | None = None,
     include_geometry: bool = True,
     reproj_thresh_px: float = 3.0,
     rejection_audit_path: str | Path | None = None,
@@ -278,6 +280,7 @@ def export_all_stages(
         j=j,
         feat_cfg=feat_cfg,
         frame_features_cache=frame_features_cache,
+        map_cfg=map_cfg,
         include_geometry=include_geometry,
         reproj_thresh_px=reproj_thresh_px,
         rejection_audit_path=audit_path,
@@ -297,6 +300,7 @@ def export_sequence_consecutive_pairs(
     feat_cfg: FeatureConfig | None = None,
     fuse_merge_px: float = 4.0,
     pair_lookback: int = 10,
+    map_cfg: MapConfig | None = None,
     include_geometry: bool = True,
     reproj_thresh_px: float = 3.0,
     rejection_audit_path: str | Path | None = None,
@@ -340,9 +344,9 @@ def export_sequence_consecutive_pairs(
 
     frame_cache = compute_frame_features_cache(grays, fc)
 
-    map_cfg = MapConfig()
+    cfg = map_cfg if map_cfg is not None else MapConfig()
     inc = IncrementalMap(
-        cfg=map_cfg,
+        cfg=cfg,
         feat_cfg=fc,
         K=ds.calibration.K,
         world_T_camera=ds.world_T_camera,
@@ -371,6 +375,7 @@ def export_sequence_consecutive_pairs(
             feat_cfg=fc,
             reuse_two_view=tw,
             frame_features_cache=frame_cache,
+            map_cfg=cfg,
             include_geometry=include_geometry,
             reproj_thresh_px=reproj_thresh_px,
             rejection_audit_path=audit_path,
