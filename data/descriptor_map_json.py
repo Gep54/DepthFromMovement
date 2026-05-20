@@ -14,7 +14,8 @@ def load_descriptor_map_json(path: Path, method: Literal["ORB", "SIFT"]) -> Desc
     Load :class:`~pipeline.descriptor_landmark_map.DescriptorMapConfig`.
 
     Keys (all optional): ``merge_beta`` (number or null), ``max_match_distance``, ``ratio_second_best`` (number or null),
-    ``spatial_merge_radius_m`` (minimum keyframe spacing for 3D merge gate; omit to disable).
+    ``spatial_merge_radius_m`` (minimum keyframe spacing for 3D merge gate; omit to disable),
+    ``max_range_baseline_factor`` (triangulation range gate; <=0 disables).
     ``merge_beta: null`` or omitted means mean-equivalent EMA (``1/(n+1)`` per update).
     """
     if not path.is_file():

@@ -59,9 +59,18 @@ def main() -> None:
         default="vision_scale",
         help="How odometry enters two-view triangulation (default vision_scale)",
     )
+    p.add_argument(
+        "--max-range-baseline-factor",
+        type=float,
+        default=0.0,
+        help="Drop triangulated points beyond factor * max(baseline_m, 1e-3) in cam1 (<=0 disables)",
+    )
     args = p.parse_args()
     ds = load_dataset(args.dataset_root)
-    map_cfg = MapConfig(triangulation_motion_source=args.triangulation_motion_source)
+    map_cfg = MapConfig(
+        triangulation_motion_source=args.triangulation_motion_source,
+        max_range_baseline_factor=args.max_range_baseline_factor,
+    )
     include_geometry = not args.no_geometry_stages
     audit_path = args.rejection_audit
     if args.sequence:

@@ -43,6 +43,12 @@ def main() -> None:
     )
     p.add_argument("--export-csv", type=Path, default=None, help="Write landmarks CSV to this path")
     p.add_argument("--iter-viz", action="store_true", help="Save PNG snapshot after each processed pair")
+    p.add_argument(
+        "--max-range-baseline-factor",
+        type=float,
+        default=None,
+        help="Drop triangulated points beyond factor * max(baseline_m, 1e-3) in cam1 (<=0 disables)",
+    )
     args = p.parse_args()
 
     ds = load_dataset(args.dataset_root)
@@ -59,12 +65,26 @@ def main() -> None:
     if args.spatial_merge_radius_m is not None:
         desc_cfg = replace(desc_cfg, spatial_merge_radius_m=float(args.spatial_merge_radius_m))
 
+    range_factor = 0.0
+    if args.max_range_baseline_factor is not None:
+        range_factor = float(args.max_range_baseline_factor)
+    else:
+        cfg_json = Path(cfg_path)
+        if cfg_json.is_file():
+            import json
+
+            with cfg_json.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if "max_range_baseline_factor" in raw:
+                range_factor = float(raw["max_range_baseline_factor"])
+
     desc_map = run_descriptor_landmark_pipeline(
         ds,
         args.run_dir,
         pair_lookback=args.pair_lookback,
         desc_cfg=desc_cfg,
         save_iter_viz=args.iter_viz,
+        max_range_baseline_factor=range_factor,
     )
 
     if args.export_csv is not None:

@@ -17,6 +17,7 @@ from pipeline.geometry import (
     vision_rotation_odom_translation_scale,
 )
 from pipeline.matching import match_pair_points
+from pipeline.range_gate import apply_max_range_gate_cam1
 from pipeline.triangulation import triangulate_cam1_frame, cam1_to_world_points
 from pipeline.features import FrameFeatures, detect_and_compute
 from pipeline.metrics import reprojection_errors, summarize_reprojection
@@ -44,6 +45,8 @@ class MapConfig:
     triangulation_motion_source: TriangulationMotionSource = "vision_scale"
     ransac_epipolar_thresh: float = 1.0
     min_parallax_deg: float = 0.5
+    max_range_baseline_factor: float = 0.0
+    """If > 0, drop triangulated points with ``||X_cam1|| > factor * max(||t_est||, 1e-3)``."""
 
 
 @dataclass
@@ -312,6 +315,13 @@ class IncrementalMap:
         Wj: np.ndarray,
     ) -> TwoViewResult:
         X_cam_h, cheiral = triangulate_cam1_frame(pts1_i, pts2_i, self.K, R_est, t_est)
+        baseline_m = float(np.linalg.norm(np.asarray(t_est, dtype=np.float64).ravel()))
+        cheiral = apply_max_range_gate_cam1(
+            X_cam_h,
+            cheiral,
+            baseline_m,
+            self.cfg.max_range_baseline_factor,
+        )
         X_h = cam1_to_world_points(X_cam_h, Wi)
         X_h[:, ~cheiral] = np.nan
         err1 = reprojection_errors(X_h, pts1_i, self.K, Wi)

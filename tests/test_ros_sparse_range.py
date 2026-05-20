@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[1]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
 _PKG = _REPO / "ros2_ws" / "src" / "incremental_vo_ros2"
 if str(_PKG) not in sys.path:
     sys.path.insert(0, str(_PKG))

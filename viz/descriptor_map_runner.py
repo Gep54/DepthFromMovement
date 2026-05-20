@@ -32,6 +32,7 @@ def run_descriptor_landmark_pipeline(
     pair_lookback: int = 10,
     desc_cfg: DescriptorMapConfig,
     save_iter_viz: bool = False,
+    max_range_baseline_factor: float = 0.0,
 ) -> DescriptorLandmarkMap:
     """
     Multi-baseline pairing (same as sequence export), landmark fusion in camera-0 frame.
@@ -59,7 +60,7 @@ def run_descriptor_landmark_pipeline(
     fc = ds.feature_config
     frame_cache = compute_frame_features_cache(grays, fc)
 
-    map_cfg = MapConfig()
+    map_cfg = MapConfig(max_range_baseline_factor=max_range_baseline_factor)
     inc = IncrementalMap(
         cfg=map_cfg,
         feat_cfg=fc,

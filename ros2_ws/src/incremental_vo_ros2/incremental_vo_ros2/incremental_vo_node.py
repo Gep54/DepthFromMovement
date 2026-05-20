@@ -573,7 +573,10 @@ class IncrementalVoNode(Node):
             self.get_logger().error(f"Could not import pipeline: {e}")
             return
 
-        cfg = MapConfig(triangulation_motion_source=self._triangulation_motion_source)
+        cfg = MapConfig(
+            triangulation_motion_source=self._triangulation_motion_source,
+            max_range_baseline_factor=self._sparse_map_range_factor,
+        )
         feat = FeatureConfig(method=self._feature_method, n_features=self._feature_n)
         if self._inc_map is None:
             self._inc_map = IncrementalMap(
