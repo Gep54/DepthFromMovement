@@ -9,6 +9,7 @@ import numpy as np
 from pipeline.config import FeatureConfig
 from pipeline.frame_axes import world_T_body_to_world_T_opencv_cam
 from pipeline.geometry import (
+    align_translation_direction,
     epipolar_inlier_mask_from_motion,
     essential_from_R_t,
     essential_from_world_poses,
@@ -58,6 +59,8 @@ class TwoViewResult:
     t_est: np.ndarray | None
     scale: float
     scale_ok: bool
+    X_cam1_h: np.ndarray
+    """Homogeneous (4,N) in OpenCV camera-``frame_i`` after triangulation + cheirality."""
     X_world_h: np.ndarray
     cheiral_mask: np.ndarray
     reproj: dict[str, float]
@@ -118,6 +121,7 @@ class IncrementalMap:
                 t_est=None,
                 scale=1.0,
                 scale_ok=False,
+                X_cam1_h=empty,
                 X_world_h=empty,
                 cheiral_mask=np.zeros((0,), bool),
                 reproj={},
@@ -174,6 +178,7 @@ class IncrementalMap:
                 t_est=None,
                 scale=1.0,
                 scale_ok=False,
+                X_cam1_h=empty_h,
                 X_world_h=empty_h,
                 cheiral_mask=np.zeros((0,), bool),
                 reproj={},
@@ -190,9 +195,15 @@ class IncrementalMap:
         E_fm33 = np.asarray(E_fm, dtype=np.float64).reshape(3, 3)
         R_vis, t_vis, _ = recover_pose_from_essential(E_fm33, pts1_i, pts2_i, self.K, mask=None)
         R_est, t_est, scale_ok, scale = vision_rotation_odom_translation_scale(R_vis, t_vis, t_gt)
+        t_vis = np.asarray(t_vis, dtype=np.float64)
 
         if not scale_ok:
             return _failure_result(essential_from_world_poses(Wi, Wj, self.K))
+
+        t_triang = align_translation_direction(t_vis, t_gt)
+        nv = float(np.linalg.norm(t_triang))
+        if nv >= _MOTION_BASELINE_EPS:
+            t_triang = (t_triang / nv).reshape(3, 1)
 
         return self._finish_two_view(
             i,
@@ -210,6 +221,8 @@ class IncrementalMap:
             desc_inlier,
             Wi,
             Wj,
+            t_triangulate=t_triang,
+            depth_scale=scale if scale_ok else 1.0,
         )
 
     def _add_frame_pair_odometry_pose(
@@ -253,6 +266,7 @@ class IncrementalMap:
                 t_est=None,
                 scale=1.0,
                 scale_ok=False,
+                X_cam1_h=empty_h,
                 X_world_h=empty_h,
                 cheiral_mask=np.zeros((0,), bool),
                 reproj={},
@@ -310,8 +324,14 @@ class IncrementalMap:
         desc_inlier: np.ndarray,
         Wi: np.ndarray,
         Wj: np.ndarray,
+        *,
+        t_triangulate: np.ndarray | None = None,
+        depth_scale: float = 1.0,
     ) -> TwoViewResult:
-        X_cam_h, cheiral = triangulate_cam1_frame(pts1_i, pts2_i, self.K, R_est, t_est)
+        t_tri = np.asarray(t_triangulate if t_triangulate is not None else t_est, dtype=np.float64)
+        X_cam_h, cheiral = triangulate_cam1_frame(pts1_i, pts2_i, self.K, R_est, t_tri)
+        if depth_scale != 1.0 and np.any(cheiral):
+            X_cam_h[2, cheiral] *= float(depth_scale)
         X_h = cam1_to_world_points(X_cam_h, Wi)
         X_h[:, ~cheiral] = np.nan
         err1 = reprojection_errors(X_h, pts1_i, self.K, Wi)
@@ -329,6 +349,7 @@ class IncrementalMap:
             t_est=t_est,
             scale=scale,
             scale_ok=scale_ok,
+            X_cam1_h=X_cam_h,
             X_world_h=X_h,
             cheiral_mask=cheiral,
             reproj=reproj,

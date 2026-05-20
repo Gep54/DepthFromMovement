@@ -18,6 +18,7 @@ def test_classify_empty_pair() -> None:
         t_est=None,
         scale=1.0,
         scale_ok=False,
+        X_cam1_h=np.zeros((4, 0), np.float64),
         X_world_h=np.zeros((4, 0), np.float64),
         cheiral_mask=np.zeros((0,), bool),
         reproj={},
