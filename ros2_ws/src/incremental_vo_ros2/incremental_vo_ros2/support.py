@@ -22,20 +22,14 @@ from incremental_vo_ros2.image_buffer import (
     should_buffer_image,
 )
 from incremental_vo_ros2.offline_dataset import offline_dataset_image_basename
-from incremental_vo_ros2.range_gate import (
-    consecutive_keyframe_baseline_m,
-    max_sparse_range_m,
-)
 
 __all__ = [
     "BufferedFrame",
     "camera_info_to_calibration",
-    "consecutive_keyframe_baseline_m",
     "copy_image_msg",
     "ensure_pipeline_on_path",
     "eval_world_T_camera0_from_parameter",
     "image_msg_to_gray_undistorted",
-    "max_sparse_range_m",
     "odom_position_xyz",
     "odom_to_cam_to_world_T",
     "offline_dataset_image_basename",

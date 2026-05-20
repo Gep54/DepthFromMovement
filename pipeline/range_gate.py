@@ -5,13 +5,6 @@ from __future__ import annotations
 import numpy as np
 
 
-def consecutive_keyframe_baseline_m(Wi: np.ndarray, Wj: np.ndarray) -> float:
-    """Translation norm between consecutive keyframe ``world_T_camera`` poses."""
-    ti = np.asarray(Wi, dtype=np.float64)[:3, 3]
-    tj = np.asarray(Wj, dtype=np.float64)[:3, 3]
-    return float(np.linalg.norm(tj - ti))
-
-
 def max_sparse_range_m(
     baseline_m: float,
     factor: float,

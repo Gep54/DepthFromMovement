@@ -39,12 +39,10 @@ from incremental_vo_ros2.param_config import apply_config_to_argv
 from incremental_vo_ros2.support import (
     BufferedFrame,
     camera_info_to_calibration,
-    consecutive_keyframe_baseline_m,
     copy_image_msg,
     ensure_pipeline_on_path,
     eval_world_T_camera0_from_parameter,
     image_msg_to_gray_undistorted,
-    max_sparse_range_m,
     odom_position_xyz,
     odom_to_cam_to_world_T,
     pose_stamped_to_world_T_camera,
@@ -151,7 +149,6 @@ class IncrementalVoNode(Node):
         self.declare_parameter("sparse_map_topic", "sparse_map")
         self.declare_parameter("sparse_map_publish_period_s", 1.0)
         self.declare_parameter("sparse_map_frame_id", "")
-        self.declare_parameter("sparse_map_max_range_baseline_factor", 100.0)
         self.declare_parameter("save_run_on_shutdown", False)
 
         # Offline dataset export (``load_dataset`` / ``dfm-export-steps``-ready layout).
@@ -320,12 +317,6 @@ class IncrementalVoNode(Node):
             )
             pose_src = "odom"
         self._offline_pose_source = pose_src
-        self._sparse_map_range_factor = float(
-            self.get_parameter("sparse_map_max_range_baseline_factor")
-            .get_parameter_value()
-            .double_value
-        )
-        self._last_consecutive_baseline_m: float | None = None
 
         self._pose_fusion = None
         if repo is not None:
@@ -489,11 +480,6 @@ class IncrementalVoNode(Node):
                 if self._offline_dataset_dir is not None
                 else " | offline_dataset export disabled"
             )
-            + (
-                f" | sparse_map_max_range_baseline_factor={self._sparse_map_range_factor}"
-                if self._sparse_map_range_factor > 0.0
-                else " | sparse_map range filter disabled (factor<=0)"
-            )
             + f" | triangulation_motion_source={self._triangulation_motion_source!r}"
         )
 
@@ -573,10 +559,7 @@ class IncrementalVoNode(Node):
             self.get_logger().error(f"Could not import pipeline: {e}")
             return
 
-        cfg = MapConfig(
-            triangulation_motion_source=self._triangulation_motion_source,
-            max_range_baseline_factor=self._sparse_map_range_factor,
-        )
+        cfg = MapConfig(triangulation_motion_source=self._triangulation_motion_source)
         feat = FeatureConfig(method=self._feature_method, n_features=self._feature_n)
         if self._inc_map is None:
             self._inc_map = IncrementalMap(
@@ -799,20 +782,6 @@ class IncrementalVoNode(Node):
             msg += f" | odom spacing ~{distance_trigger_m:.3f} m (threshold {self._d})"
         self.get_logger().info(msg)
 
-        max_range_cam0: float | None = None
-        if idx >= 1 and len(self._world_T_camera) > idx:
-            baseline_m = consecutive_keyframe_baseline_m(
-                self._world_T_camera[idx - 1], self._world_T_camera[idx]
-            )
-            self._last_consecutive_baseline_m = baseline_m
-            max_range_cam0 = max_sparse_range_m(baseline_m, self._sparse_map_range_factor)
-            if max_range_cam0 is not None and self._desc_map is not None:
-                pruned = self._desc_map.prune_beyond_range_cam0(max_range_cam0)
-                self.get_logger().info(
-                    f"Sparse range gate keyframe {idx}: baseline={baseline_m:.4f} m "
-                    f"max_range_cam0={max_range_cam0:.4f} m pruned={pruned}"
-                )
-
         if idx >= 1 and self._inc_map is not None:
             for off in range(1, min(self._pair_lookback, idx) + 1):
                 i = idx - off
@@ -830,7 +799,6 @@ class IncrementalVoNode(Node):
                                 tw,
                                 self._world_T_camera[0],
                                 self._world_T_camera[tw.frame_j],
-                                max_range_cam0=max_range_cam0,
                                 spatial_merge_radius_m=self._d,
                             )
                         except Exception as ex:
@@ -879,19 +847,6 @@ class IncrementalVoNode(Node):
             )
             self._write_offline_motion_true_json()
 
-        max_range_cam0: float | None = None
-        if idx >= 1 and len(self._world_T_camera_true) > idx:
-            baseline_m = consecutive_keyframe_baseline_m(
-                self._world_T_camera_true[idx - 1], self._world_T_camera_true[idx]
-            )
-            max_range_cam0 = max_sparse_range_m(baseline_m, self._sparse_map_range_factor)
-            if max_range_cam0 is not None and self._desc_map_true is not None:
-                pruned = self._desc_map_true.prune_beyond_range_cam0(max_range_cam0)
-                self.get_logger().info(
-                    f"GT sparse range gate keyframe {idx}: baseline={baseline_m:.4f} m "
-                    f"max_range_cam0={max_range_cam0:.4f} m pruned={pruned}"
-                )
-
         if idx >= 1 and self._inc_map_true is not None:
             for off in range(1, min(self._pair_lookback, idx) + 1):
                 i = idx - off
@@ -909,7 +864,6 @@ class IncrementalVoNode(Node):
                                 tw,
                                 self._world_T_camera_true[0],
                                 self._world_T_camera_true[tw.frame_j],
-                                max_range_cam0=max_range_cam0,
                                 spatial_merge_radius_m=self._d,
                             )
                         except Exception as ex:
